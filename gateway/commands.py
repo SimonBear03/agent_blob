@@ -267,12 +267,11 @@ async def handle_session_switch_command(
     # Switch this client to the target session
     connection_manager.switch_client_session(websocket, target_session_id)
     
-    # Send session_changed event
+    # Send session_changed event (without custom message to show full context)
     await send_session_changed_event(
         target_session_id,
         websocket,
-        connection_manager,
-        message=f"✓ Switched to: {target_session.get('title', 'Untitled')}"
+        connection_manager
     )
 
 

@@ -208,12 +208,21 @@ class TelegramBotClient:
         if status == "streaming" and self.current_chat_id:
             # Start new message for streaming with role prefix
             self.streaming_buffer = "🤖 **Assistant:**\n"
-            msg = await self.bot.send_message(
-                self.current_chat_id,
-                self.streaming_buffer + "▊",
-                parse_mode="Markdown"
-            )
-            self.current_message_id = msg.message_id
+            try:
+                msg = await self.bot.send_message(
+                    self.current_chat_id,
+                    self.streaming_buffer + "▊",
+                    parse_mode="Markdown"
+                )
+                self.current_message_id = msg.message_id
+            except Exception as e:
+                # If markdown fails, try without
+                logger.warning(f"Markdown failed for streaming start: {e}")
+                msg = await self.bot.send_message(
+                    self.current_chat_id,
+                    "🤖 Assistant:\n▊"
+                )
+                self.current_message_id = msg.message_id
         elif status == "thinking" and self.current_chat_id:
             await self.bot.send_chat_action(self.current_chat_id, "typing")
     
@@ -233,7 +242,7 @@ class TelegramBotClient:
         # Finalize streaming message with metadata
         if self.current_message_id and self.streaming_buffer:
             # Add metadata footer
-            metadata = f"\n\n─────────────────────\n"
+            metadata = f"\n\n---\n"
             metadata += f"📊 **Model:** `{model}` | **Tokens:** {total_tokens:,}\n"
             metadata += f"💬 **Session:** {self.current_session_title[:30]}"
             
@@ -249,11 +258,7 @@ class TelegramBotClient:
             except Exception as e:
                 # If edit fails (maybe message too old), send as new message
                 logger.warning(f"Failed to edit final message: {e}")
-                await self.bot.send_message(
-                    self.current_chat_id,
-                    final_text,
-                    parse_mode="Markdown"
-                )
+                await self._send_telegram_message(self.current_chat_id, final_text)
         
         # Reset state
         self.current_message_id = None
@@ -264,9 +269,9 @@ class TelegramBotClient:
         message = payload.get("message", "Unknown error")
         
         if self.current_chat_id:
-            await self.bot.send_message(
+            await self._send_telegram_message(
                 self.current_chat_id,
-                f"❌ Error: {message}"
+                f"❌ **Error:** {message}"
             )
     
     async def _handle_session_changed(self, payload: dict):
@@ -312,7 +317,7 @@ class TelegramBotClient:
                     recent_messages = messages[-4:]
                     
                     text += "\n\n**Recent context:**\n"
-                    text += "─" * 30 + "\n"
+                    text += "---\n"
                     
                     for msg in recent_messages:
                         role = msg.get("role", "unknown")
@@ -330,9 +335,9 @@ class TelegramBotClient:
                         elif role == "system":
                             text += f"⚙️ **System:** {content}\n\n"
                     
-                    text += "─" * 30
+                    text += "---"
             
-            await self.bot.send_message(self.current_chat_id, text)
+            await self._send_telegram_message(self.current_chat_id, text)
     
     # Utility methods
     
