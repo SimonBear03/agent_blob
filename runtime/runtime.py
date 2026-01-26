@@ -53,6 +53,19 @@ class AgentRuntime:
             logger.warning(f"Could not load system prompt from {path}: {e}")
             return "You are a helpful AI assistant with access to tools and persistent memory."
     
+    def get_model_info(self) -> dict:
+        """
+        Get information about the current model configuration.
+        
+        Returns:
+            dict with keys: model_name, context_limit
+        """
+        from shared.model_config import get_model_context_limit
+        return {
+            "model_name": self.model_name,
+            "context_limit": get_model_context_limit(self.model_name)
+        }
+    
     async def process(self, request) -> AsyncIterator[Dict[str, Any]]:
         """
         Process an agent request and yield event stream.
@@ -111,12 +124,13 @@ class AgentRuntime:
             while iteration < max_iterations:
                 iteration += 1
                 
-                # Call OpenAI with streaming
+                # Call OpenAI with streaming (include usage data)
                 response_stream = await self.client.chat.completions.create(
                     model=self.model_name,
                     messages=messages,
                     tools=tools if tools else None,
-                    stream=True
+                    stream=True,
+                    stream_options={"include_usage": True}
                 )
                 
                 # Yield status: streaming
@@ -131,7 +145,16 @@ class AgentRuntime:
                 
                 # Stream tokens
                 tool_calls_accumulator = {}
+                usage_data = None
                 async for chunk in response_stream:
+                    # Capture usage data from final chunk
+                    if hasattr(chunk, 'usage') and chunk.usage:
+                        usage_data = chunk.usage
+                    
+                    # Skip chunks without choices (like the final usage-only chunk)
+                    if not chunk.choices or len(chunk.choices) == 0:
+                        continue
+                    
                     delta = chunk.choices[0].delta
                     
                     # Stream content tokens
@@ -296,14 +319,30 @@ class AgentRuntime:
             # Update session timestamp
             SessionsDB.update_session(session_id)
             
-            # Yield final event
+            # Get actual token usage from OpenAI (if available)
+            if usage_data:
+                prompt_tokens = usage_data.prompt_tokens
+                completion_tokens = usage_data.completion_tokens
+                total_tokens = usage_data.total_tokens
+            else:
+                # Fallback to estimation if usage not available
+                prompt_tokens = sum(len(msg.get("content", "")) for msg in history) // 4
+                completion_tokens = len(collected_content) // 4
+                total_tokens = prompt_tokens + completion_tokens
+            
+            # Yield final event with token usage
             yield {
                 "type": "event",
                 "event": "final",
                 "payload": {
                     "runId": run_id,
                     "messageId": saved_msg["id"],
-                    "totalTokens": 0  # TODO: Get from response
+                    "usage": {
+                        "promptTokens": prompt_tokens,
+                        "completionTokens": completion_tokens,
+                        "totalTokens": total_tokens
+                    },
+                    "model": self.model_name  # Include actual model used
                 }
             }
         

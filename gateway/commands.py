@@ -58,21 +58,17 @@ async def handle_help_command(session_id: str, connection_manager: ConnectionMan
     help_text = """**Available Commands:**
 
 **Session Management:**
-• `/new` - Create new session and switch to it
-• `/sessions` - List recent sessions (sorted by activity)
+• `/new` - Create new conversation
+• `/sessions` - List recent sessions
 • `/switch <number>` - Switch to a session from the list
-• `/switch <uuid>` - Switch to a specific session by ID
-• `/history [count]` - Show last N messages (default: 20)
-
-**Status & Info:**
-• `/status` - Show current session status
+• `/status` - Show current session info
 • `/help` - Show this help message
 
 **Natural Language:**
 You can also ask the agent naturally:
-• "Show me sessions about AI"
-• "Switch to my conversation from yesterday"
-• "What processes are running?"
+• "Show me conversations about Python"
+• "What did we discuss in our last conversation?"
+• "Search for sessions about databases"
 """
     await send_command_response(session_id, help_text, connection_manager)
 
@@ -107,9 +103,10 @@ async def handle_sessions_command(session_id: str, connection_manager: Connectio
     from runtime.db.sessions import SessionsDB
     from runtime.db.messages import MessagesDB
     from datetime import datetime
+    import sqlite3
     
-    # Get recent sessions from database
-    sessions = SessionsDB.list_sessions(limit=10, offset=0)
+    # Get recent sessions from database (limit to 9 for display)
+    sessions = SessionsDB.list_sessions(limit=9, offset=0)
     
     if not sessions:
         message = """📋 **Recent Sessions:**
@@ -117,32 +114,45 @@ async def handle_sessions_command(session_id: str, connection_manager: Connectio
 No sessions found. This is your first conversation!"""
     else:
         lines = ["📋 **Recent Sessions:**\n"]
+        
+        # Get message counts for all sessions in one query (more efficient)
+        from runtime.db import get_db
+        conn = get_db().get_connection()
+        cursor = conn.cursor()
+        
         for idx, sess in enumerate(sessions, 1):
-            # Get message count
-            messages = MessagesDB.list_messages(sess["id"], limit=1, offset=0)
-            msg_count = len(messages)
+            sess_id = sess["id"]
+            
+            # Get actual message count
+            cursor.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (sess_id,))
+            msg_count = cursor.fetchone()[0]
             
             # Format time
-            updated = datetime.fromisoformat(sess["updated_at"].replace("Z", "+00:00"))
-            now = datetime.utcnow()
-            delta = now - updated.replace(tzinfo=None)
-            
-            if delta.seconds < 60:
-                time_str = "just now"
-            elif delta.seconds < 3600:
-                time_str = f"{delta.seconds // 60}m ago"
-            elif delta.days == 0:
-                time_str = f"{delta.seconds // 3600}h ago"
-            elif delta.days == 1:
-                time_str = "yesterday"
-            else:
-                time_str = f"{delta.days}d ago"
+            try:
+                updated = datetime.fromisoformat(sess["updated_at"].replace("Z", "+00:00"))
+                now = datetime.utcnow()
+                delta = now - updated.replace(tzinfo=None)
+                
+                if delta.total_seconds() < 60:
+                    time_str = "just now"
+                elif delta.total_seconds() < 3600:
+                    time_str = f"{int(delta.total_seconds() // 60)}m ago"
+                elif delta.days == 0:
+                    time_str = f"{int(delta.total_seconds() // 3600)}h ago"
+                elif delta.days == 1:
+                    time_str = "yesterday"
+                else:
+                    time_str = f"{delta.days}d ago"
+            except:
+                time_str = "unknown"
             
             title = sess["title"] or "Untitled"
-            session_short = sess["id"][:8]
-            lines.append(f"{idx}. [{time_str}] {title} `{session_short}...` ({msg_count} msgs)")
+            current_marker = " ← current" if sess_id == session_id else ""
+            lines.append(f"{idx}. **{title}** • {msg_count} messages • {time_str}{current_marker}")
         
-        lines.append("\nReply with `/switch <number>` to switch (e.g., `/switch 2`)")
+        conn.close()
+        
+        lines.append("\nType `/switch <number>` to switch sessions (e.g., `/switch 2`)")
         message = "\n".join(lines)
     
     await send_command_response(session_id, message, connection_manager)
@@ -237,14 +247,14 @@ async def send_command_response(
     message: str,
     connection_manager: ConnectionManager
 ):
-    """Send command response as an assistant message event."""
+    """Send command response as a system message event."""
     import uuid
     from datetime import datetime
     
     event = create_event(
         event_type=EventType.MESSAGE,
         payload={
-            "role": "assistant",
+            "role": "system",
             "content": message,
             "messageId": f"msg_{uuid.uuid4().hex[:16]}",
             "timestamp": datetime.utcnow().isoformat() + "Z"
@@ -281,6 +291,17 @@ async def send_session_changed_event(
     # Get recent messages
     messages = MessagesDB.list_messages(new_session_id, limit=50, offset=0)
     
+    # Estimate token usage for context window (rough: 1 token ~= 4 chars)
+    total_chars = sum(len(msg.get("content", "")) for msg in messages)
+    estimated_tokens = total_chars // 4
+    
+    # Get model and context limit from runtime (single source of truth)
+    from runtime.runtime import get_runtime
+    runtime = get_runtime()
+    model_info = runtime.get_model_info()
+    model_name = model_info["model_name"]
+    token_limit = model_info["context_limit"]
+    
     # Build event
     event = create_event(
         event_type=EventType.SESSION_CHANGED,
@@ -298,6 +319,12 @@ async def send_session_changed_event(
                 }
                 for msg in messages
             ],
+            "stats": {
+                "messageCount": len(messages),
+                "modelName": model_name,
+                "tokensUsed": estimated_tokens,
+                "tokensLimit": token_limit
+            },
             "message": message  # Optional status message
         }
     )

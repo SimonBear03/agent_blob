@@ -142,6 +142,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # Handle connect request
         client_type = request.params.get("clientType", "unknown")
         protocol_version = request.params.get("version", "1")
+        session_preference = request.params.get("sessionPreference", "auto")  # "auto", "new", or "continue"
         
         if protocol_version != "1":
             error_response = create_response(
@@ -153,19 +154,33 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close()
             return
         
-        # Gateway decides which session to assign (always most recent, or create first)
+        # Gateway decides which session to assign based on preference
         from runtime.db.sessions import SessionsDB
         from runtime.db.messages import MessagesDB
+        import uuid
         
-        sessions = SessionsDB.list_sessions(limit=1, offset=0)
-        if sessions:
-            session_id = sessions[0]["id"]
-            logger.info(f"Connected to most recent session: {session_id[:8]}...")
-        else:
-            # No sessions exist, create the first one
+        is_new_user = False
+        is_new_session = False
+        
+        if session_preference == "new":
+            # Explicitly requested new session
             session = SessionsDB.create_session(title="New conversation")
             session_id = session["id"]
-            logger.info(f"Created first session: {session_id[:8]}...")
+            is_new_session = True
+            logger.info(f"Created new session: {session_id[:8]}...")
+        else:
+            # "auto" or "continue" - try to use most recent
+            sessions = SessionsDB.list_sessions(limit=1, offset=0)
+            if sessions:
+                session_id = sessions[0]["id"]
+                logger.info(f"Connected to most recent session: {session_id[:8]}...")
+            else:
+                # No sessions exist, create the first one
+                session = SessionsDB.create_session(title="New conversation")
+                session_id = session["id"]
+                is_new_user = True
+                is_new_session = True
+                logger.info(f"Created first session: {session_id[:8]}...")
         
         # Add client to connection manager
         connection_manager.add_client(session_id, websocket, client_type)
@@ -193,6 +208,17 @@ async def websocket_endpoint(websocket: WebSocket):
         session = SessionsDB.get_session(session_id)
         messages = MessagesDB.list_messages(session_id, limit=50, offset=0)
         
+        # Estimate token usage for context window (rough: 1 token ~= 4 chars)
+        total_chars = sum(len(msg.get("content", "")) for msg in messages)
+        estimated_tokens = total_chars // 4
+        
+        # Get model and context limit from runtime (single source of truth)
+        from runtime.runtime import get_runtime
+        runtime = get_runtime()
+        model_info = runtime.get_model_info()
+        model_name = model_info["model_name"]
+        token_limit = model_info["context_limit"]
+        
         from .protocol import EventType, create_event
         session_event = create_event(
             event_type=EventType.SESSION_CHANGED,
@@ -209,10 +235,68 @@ async def websocket_endpoint(websocket: WebSocket):
                         "timestamp": msg["created_at"]
                     }
                     for msg in messages
-                ]
+                ],
+                "stats": {
+                    "messageCount": len(messages),
+                    "modelName": model_name,
+                    "tokensUsed": estimated_tokens,
+                    "tokensLimit": token_limit
+                }
             }
         )
         await websocket.send_json(session_event)
+        
+        # Send welcome message
+        from datetime import datetime
+        session = SessionsDB.get_session(session_id)
+        message_count = len(messages)
+        
+        if is_new_user:
+            welcome_text = """👋 **Welcome to Agent Blob!** This is your first conversation.
+
+Type `/help` to see what I can do, or just start chatting!"""
+        elif is_new_session:
+            welcome_text = """✨ **New conversation started!**
+
+Type `/sessions` to see your other conversations, or `/help` for commands."""
+        else:
+            # Returning to existing session
+            title = session.get("title", "Untitled")
+            
+            # Format time
+            try:
+                updated_at = session.get("updated_at", "")
+                updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                now = datetime.utcnow()
+                delta = now - updated.replace(tzinfo=None)
+                
+                if delta.total_seconds() < 60:
+                    time_str = "just now"
+                elif delta.total_seconds() < 3600:
+                    time_str = f"{int(delta.total_seconds() // 60)}m ago"
+                elif delta.days == 0:
+                    time_str = f"{int(delta.total_seconds() // 3600)}h ago"
+                elif delta.days == 1:
+                    time_str = "yesterday"
+                else:
+                    time_str = f"{delta.days}d ago"
+            except:
+                time_str = "recently"
+            
+            welcome_text = f"""👋 **Welcome back!** You're in **{title}** ({message_count} messages from {time_str}).
+
+Type `/sessions` to see other conversations or `/new` to start fresh."""
+        
+        welcome_event = create_event(
+            event_type=EventType.MESSAGE,
+            payload={
+                "role": "system",
+                "content": welcome_text,
+                "messageId": f"msg_{uuid.uuid4().hex[:16]}",
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }
+        )
+        await websocket.send_json(welcome_event)
         
         # Handle subsequent messages
         while True:

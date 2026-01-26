@@ -18,6 +18,10 @@ openai==2.15.0
 # Database
 aiosqlite==0.22.1
 
+# CLI (for interactive client)
+rich==13.9.4
+prompt-toolkit==3.0.48
+
 # Utilities
 python-dotenv==1.0.1
 python-multipart==0.0.20
