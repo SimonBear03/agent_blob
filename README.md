@@ -14,6 +14,7 @@ Agent Blob v0.1.1 uses a **WebSocket-only** architecture inspired by Clawdbot, e
 - **runtime/**: Event-streaming agent with tool execution and process management
 - **clients/**: Client implementations
   - **cli/**: TUI (Text User Interface) - modern terminal client with split-screen layout
+  - **telegram/**: Telegram bot client - chat with AI from Telegram
 - **shared/**: Protocol specs, prompts, and schemas
 
 ### Architecture Diagram
@@ -52,13 +53,48 @@ Agent Blob v0.1.1 uses a **WebSocket-only** architecture inspired by Clawdbot, e
 └────────────┘  └─────────────────┘  └───────────┘
 ```
 
+### "Dumb Client" Philosophy
+
+**The key architectural principle:** Clients are just chatboxes.
+
+All clients (TUI, Web, Telegram) follow the same simple pattern:
+- **Send** text messages to gateway
+- **Receive** and display text responses
+- **Handle** minimal local UI commands only (`/clear`, `/quit`)
+
+**Everything else happens in the gateway:**
+- ✅ Command parsing (`/sessions`, `/new`, `/help`)
+- ✅ Session management (create, list, search, switch)
+- ✅ Message formatting and response generation
+- ✅ Multi-client coordination and broadcasting
+- ✅ History management and statistics
+
+**Why this matters:**
+- **Universal commands**: `/sessions` works identically in TUI, Web, and Telegram
+- **Easy to build**: A basic client is < 200 lines of code
+- **Consistent UX**: All clients get the same features automatically
+- **Future-proof**: Add features to gateway once, all clients benefit
+
+**Example:** When you type `/sessions`, your client just sends that text to the gateway. The gateway:
+1. Recognizes it as a command
+2. Queries the database
+3. Formats a nice text response
+4. Sends it back as a `MESSAGE` event
+
+Your client just displays it - no command parsing, no API calls, no formatting logic!
+
+**Read more:**
+- 📖 `docs/DUMB_CLIENT_PHILOSOPHY.md` - Deep dive with examples
+- 📖 `docs/ARCHITECTURE.md` - Complete architecture details
+- 📖 `docs/CLIENT_DESIGN.md` - Client implementation patterns
+
 ## Key Features
 
 - **WebSocket Protocol**: Universal transport for all clients (Web, CLI, Telegram)
 - **Multi-Client Support**: Multiple clients can connect to the same session simultaneously
 - **Real-Time Streaming**: Token-by-token streaming from GPT-4o with status updates
 - **Session Management**: Search, list, paginate, and switch between conversation sessions
-- **Gateway Commands**: Built-in commands (`/sessions`, `/switch`, `/new`, `/help`, etc.)
+- **Gateway Commands**: Built-in commands (`/sessions`, `/new`, `/help`, etc.)
 - **Modern TUI Client**: Split-screen terminal interface with persistent history and status bar
 - **Tool Execution**: Filesystem, memory, session search, and process management
 - **Process Tracking**: Monitor and cancel long-running operations
@@ -105,8 +141,9 @@ python run_gateway.py
 # Health: http://127.0.0.1:3336/health
 ```
 
-### 4. Start the TUI Client
+### 4. Start a Client
 
+**Option A: TUI (Terminal Interface)**
 ```bash
 # In a new terminal, start the TUI
 python run_cli.py
@@ -123,6 +160,24 @@ python run_cli.py
 # /new - Create a new session
 # /status - Show current session stats
 ```
+
+**Option B: Telegram Bot**
+```bash
+# Set up bot (one-time):
+# 1. Message @BotFather on Telegram, create bot, get token
+# 2. Message @userinfobot to get your user ID
+# 3. Add to .env:
+#    TELEGRAM_BOT_TOKEN=your_token
+#    TELEGRAM_USER_ID=your_id
+# 4. Install: pip install -r clients/telegram/requirements.txt
+
+# Start bot
+python run_telegram.py
+
+# Then use your bot on Telegram!
+```
+
+See `clients/telegram/README.md` for detailed Telegram setup.
 
 ### 5. Test Basic Connection (Optional)
 
@@ -219,10 +274,13 @@ Commands are messages starting with `/` that are processed by the gateway:
 ### Session Management
 - `/sessions` - List recent sessions (page 1, 9 per page)
 - `/sessions <n>` - Show page N of sessions
+- `/sessions` - List sessions, then type a number to switch
+- `/sessions 2` or `/sessions page 2` - Show page 2
 - `/sessions next` / `/sessions prev` - Navigate through pages
 - `/sessions search <keyword>` - Search sessions by title or content
-- `/switch <n>` - Switch to session number N from the list
 - `/new` - Create a new session
+
+**Tip:** After `/sessions`, just type a number to switch! (e.g., `/sessions` → `2`)
 
 ### Information
 - `/help` - Show all available commands
@@ -241,7 +299,7 @@ agent_blob/
 │   ├── connections.py       # Multi-client connection manager
 │   ├── queue.py             # Per-session request queue
 │   ├── handlers.py          # Method routing (agent, sessions, status)
-│   ├── commands.py          # Command processing (/sessions, /switch, etc.)
+│   ├── commands.py          # Command processing (/sessions, /new, etc.)
 │   └── requirements.txt
 │
 ├── runtime/                  # Agent runtime
@@ -259,13 +317,17 @@ agent_blob/
 │       └── process_tools.py # Process list/status/cancel/wait_time
 │
 ├── clients/                  # Client implementations
-│   └── cli/                 # CLI/TUI client
-│       ├── cli_tui.py       # Modern TUI with split-screen layout
-│       ├── tui.py           # UI components (experimental)
-│       ├── ui.py            # Shared UI utilities
-│       ├── connection.py    # WebSocket connection wrapper
-│       ├── README.md        # CLI client documentation
-│       └── README_TUI.md    # TUI mode details
+│   ├── cli/                 # CLI/TUI client
+│   │   ├── cli_tui.py       # Modern TUI with split-screen layout
+│   │   ├── tui.py           # UI components (experimental)
+│   │   ├── ui.py            # Shared UI utilities
+│   │   ├── connection.py    # WebSocket connection wrapper
+│   │   ├── README.md        # CLI client documentation
+│   │   └── README_TUI.md    # TUI mode details
+│   └── telegram/            # Telegram bot client
+│       ├── telegram_bot.py  # Main bot implementation
+│       ├── requirements.txt # Bot dependencies (aiogram)
+│       └── README.md        # Setup and usage guide
 │
 ├── shared/
 │   ├── protocol/            # Protocol specs
@@ -295,6 +357,7 @@ agent_blob/
 │   └── agent_blob.db
 │
 ├── run_cli.py               # TUI client launcher
+├── run_telegram.py          # Telegram bot launcher
 ├── requirements.txt         # Python dependencies
 ├── QUICKSTART.md            # Quick start guide
 ├── PROGRESS.md              # Development progress
@@ -312,7 +375,7 @@ agent_blob/
 - Agent runtime as event generator
 - Process management and tracking
 - Session tools (search, list, get with pagination)
-- Gateway commands (/sessions, /switch, /new, /help, /status)
+- Gateway commands (/sessions, /new, /help, /status)
 - Filesystem and memory tools
 - Modern TUI client with split-screen layout
 - History limiting per client type
@@ -341,14 +404,16 @@ See `PROGRESS.md` for detailed status.
 - `README.md` - This file (overview and features)
 
 ### Architecture & Design
-- `docs/ARCHITECTURE.md` - "Dumb client" architecture and gateway design
-- `docs/CLIENT_DESIGN.md` - Client implementation guide
+- `docs/DUMB_CLIENT_PHILOSOPHY.md` - **START HERE** - Why clients are "dumb" and why it matters
+- `docs/ARCHITECTURE.md` - Complete architecture and gateway design
+- `docs/CLIENT_DESIGN.md` - Client implementation guide and patterns
 - `docs/TUI_IMPLEMENTATION.md` - TUI client implementation details
 - `shared/protocol/protocol_v1.md` - WebSocket protocol specification
 
 ### Client Documentation
 - `clients/cli/README.md` - CLI/TUI client usage
 - `clients/cli/README_TUI.md` - TUI mode detailed documentation
+- `clients/telegram/README.md` - Telegram bot setup and usage
 
 ### Development
 - `PROGRESS.md` - Development progress and status

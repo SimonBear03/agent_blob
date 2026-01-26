@@ -197,6 +197,32 @@ Clients MAY handle these locally (no gateway involvement):
 | `/clear` | Clear chat display |
 | `/quit` | Exit client application |
 
+**Important:** These are the ONLY commands clients should handle. Everything else goes to the gateway!
+
+### Why "Dumb Clients" Matter
+
+**Example: Adding a new command**
+
+Let's say you want to add a `/sessions search <keyword>` command.
+
+**❌ Traditional approach (smart clients):**
+1. Update CLI client to parse and send `sessions.search` API request
+2. Update Web client to parse and send `sessions.search` API request  
+3. Update Telegram client to parse and send `sessions.search` API request
+4. Each client formats the response differently
+5. Bugs appear in different clients
+6. Nightmare to maintain
+
+**✅ "Dumb client" approach:**
+1. Update `gateway/commands.py` to recognize `/sessions search`
+2. Gateway queries database and formats response
+3. Gateway sends as MESSAGE event
+4. **All clients get it for free** - they just display the text!
+5. One place to fix bugs
+6. One place to change formatting
+
+**The result:** Building a basic client takes < 200 lines instead of 2000+.
+
 ## Events from Gateway
 
 ### SESSION_CHANGED Event

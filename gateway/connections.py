@@ -19,6 +19,7 @@ class ClientInfo:
     history_limit: Optional[int] = None
     sessions_page: int = 1
     sessions_query: Optional[str] = None
+    last_command: Optional[str] = None  # For context-aware command handling
 
 
 class ConnectionManager:
@@ -106,6 +107,23 @@ class ConnectionManager:
             return
         client_info.sessions_page = page
         client_info.sessions_query = query
+    
+    def set_last_command(self, websocket: WebSocket, command: str):
+        """Set the last command executed by this client (for context-aware handling)."""
+        client_info = self.ws_to_client.get(websocket)
+        if client_info:
+            client_info.last_command = command
+    
+    def get_last_command(self, websocket: WebSocket) -> Optional[str]:
+        """Get the last command executed by this client."""
+        client_info = self.ws_to_client.get(websocket)
+        return client_info.last_command if client_info else None
+    
+    def clear_last_command(self, websocket: WebSocket):
+        """Clear the last command (after it's been used)."""
+        client_info = self.ws_to_client.get(websocket)
+        if client_info:
+            client_info.last_command = None
     
     def get_session_clients(self, session_id: str) -> List[ClientInfo]:
         """Get all clients connected to a session."""

@@ -207,13 +207,21 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Send initial session_changed event with session info and message history
         session = SessionsDB.get_session(session_id)
-        # Safely resolve history limit (older gateways may not have the helper yet)
+        # Resolve history limit
         try:
             effective_history_limit = connection_manager.get_history_limit(websocket)
         except AttributeError:
-            effective_history_limit = 20
-        if effective_history_limit <= 0:
+            effective_history_limit = None  # Load all by default
+        
+        # Load messages based on history limit:
+        # - None: Load all messages (default for scrollable clients like TUI)
+        # - 0: Load no messages (for clients that manage history themselves)
+        # - > 0: Load that many recent messages (for limited display like Telegram)
+        if effective_history_limit == 0:
             messages = []
+        elif effective_history_limit is None:
+            # Load all messages
+            messages = MessagesDB.list_messages(session_id, limit=10000, offset=0)
         else:
             messages = MessagesDB.list_messages(session_id, limit=effective_history_limit, offset=0)
         

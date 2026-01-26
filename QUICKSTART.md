@@ -110,9 +110,9 @@ The default TUI client provides:
 Try these gateway commands:
 - `/help` - Show all commands
 - `/sessions` - List your conversations
+- `/sessions` - List sessions, then type a number to switch (e.g., `2`)
 - `/sessions search python` - Search sessions
 - `/sessions next` / `/sessions prev` - Paginate
-- `/switch 2` - Switch to session #2
 - `/new` - Create new conversation
 - `/status` - Show current stats
 
@@ -144,7 +144,7 @@ Open multiple terminals and run `python run_cli.py` in each:
 - All clients can connect to the same session
 - Messages from one client appear in all others
 - Each client can be in a different session
-- Use `/switch` to change sessions per client
+- Use `/sessions` then type a number to change sessions per client
 
 Try it:
 ```bash
@@ -205,7 +205,7 @@ Now that you have Agent Blob running:
 4. **Client guide**: `docs/CLIENT_DESIGN.md` - Build your own client
 
 ### Explore Features
-1. **Try the commands**: `/sessions`, `/switch`, `/new`, `/status`
+1. **Try the commands**: `/sessions` then type `2` to switch
 2. **Search sessions**: `/sessions search <keyword>`
 3. **Multi-client**: Open multiple TUIs and watch messages sync
 4. **Use tools**: Ask the agent to read files, save memories, search conversations
@@ -220,16 +220,20 @@ Now that you have Agent Blob running:
 ```
 ┌─────────────────┐
 │  TUI Client     │ ← You are here!
-│  (Python)       │
+│  (Python)       │    (Just a chatbox!)
 └────────┬────────┘
          │ WebSocket (Protocol v1)
+         │ Sends: Text messages
+         │ Receives: Text responses
          │
 ┌────────▼────────────┐
-│  Gateway            │
+│  Gateway            │ ← ALL the logic lives here!
 │  - Multi-client mgr │
-│  - Commands         │
-│  - Request queue    │
-└────────┬────────────┘
+│  - Commands         │    When you type /sessions:
+│  - Request queue    │    1. Gateway parses command
+│  - Session mgmt    │    2. Gateway queries database
+│  - Formatting      │    3. Gateway formats response
+└────────┬────────────┘    4. Gateway sends back text
          │ Event Stream
 ┌────────▼────────────┐
 │  Agent Runtime      │
@@ -247,11 +251,19 @@ Now that you have Agent Blob running:
 ```
 
 **Key concepts:**
+
+### "Dumb Client" Design
+- **Clients are just chatboxes**: Send text, display text, that's it!
+- **All logic in gateway**: Command parsing, session management, formatting
+- **No client-side complexity**: No API calls, no business logic, no state management
+- **Result**: Building a new client (Web, Telegram, etc.) takes < 200 lines
+
+### Other Benefits
 - **WebSocket only**: No HTTP endpoints needed
-- **Dumb clients**: All logic in gateway, clients just display
 - **Multi-client**: Multiple clients can share sessions
 - **Event streaming**: Real-time token-by-token responses
 - **Local-first**: All data in SQLite, no cloud dependencies
+- **Universal commands**: `/sessions` works the same everywhere
 
 ## Getting Help
 

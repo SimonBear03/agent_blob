@@ -1,0 +1,6 @@
+# Telegram Bot Dependencies
+# Using latest versions with Python 3.14 support
+aiogram>=3.24.0
+pydantic>=2.12.0
+aiohttp>=3.9.0
+python-dotenv>=1.0.0

@@ -37,9 +37,6 @@ async def handle_command(
     elif cmd == "/sessions":
         await handle_sessions_command(session_id, args, websocket, connection_manager)
     
-    elif cmd == "/switch" or cmd == "/session":
-        await handle_session_switch_command(session_id, args, websocket, connection_manager)
-    
     elif cmd == "/history":
         count = int(args[0]) if args and args[0].isdigit() else 20
         await handle_history_command(session_id, count, connection_manager)
@@ -59,13 +56,15 @@ async def handle_help_command(session_id: str, connection_manager: ConnectionMan
 
 **Session Management:**
 • `/new` - Create new conversation
-• `/sessions` - List recent sessions
+• `/sessions` - List sessions, then type a number to switch
 • `/sessions 2` or `/sessions page 2` - Show page 2
-• `/sessions next` / `/sessions prev` - Paginate
+• `/sessions next` / `/sessions prev` - Navigate pages
 • `/sessions search <keyword>` - Search sessions
-• `/switch <number>` - Switch to a session from the list
 • `/status` - Show current session info
 • `/help` - Show this help message
+
+**Tip:** After `/sessions`, just type a number to switch!
+Example: `/sessions` → `2` → switches to session #2
 
 **Natural Language:**
 You can also ask the agent naturally:
@@ -143,7 +142,7 @@ async def handle_sessions_command(
         elif head.isdigit():
             page = max(1, int(head))
         else:
-            message = "Usage: `/sessions` | `/sessions 2` | `/sessions page 2` | `/sessions next` | `/sessions prev` | `/sessions search <keyword>`"
+            message = "Usage: `/sessions` | `/sessions 2` (page 2) | `/sessions page 2` | `/sessions next` | `/sessions prev` | `/sessions search <keyword>`"
             await send_command_response(session_id, message, connection_manager)
             return
     
@@ -210,12 +209,15 @@ async def handle_sessions_command(
     
     conn.close()
     
-    lines.append("\nType `/switch <number>` to switch sessions (e.g., `/switch 12`)")
-    lines.append("Use `/sessions next` or `/sessions prev` to page.")
+    lines.append("\nType a number to switch (e.g., just `2` for session #2)")
+    lines.append("Use `/sessions next` or `/sessions prev` to navigate pages.")
     message = "\n".join(lines)
     
     # Persist pagination state
     connection_manager.set_sessions_state(websocket, page, query)
+    
+    # Set last command for context-aware session switching
+    connection_manager.set_last_command(websocket, "sessions")
     
     await send_command_response(session_id, message, connection_manager)
 
@@ -355,13 +357,19 @@ async def send_session_changed_event(
         return
     
     # Get recent messages based on client history limit
-    # Safely resolve history limit (older gateways may not have the helper yet)
     try:
         history_limit = connection_manager.get_history_limit(websocket)
     except AttributeError:
-        history_limit = 20
-    if history_limit <= 0:
+        history_limit = None  # Load all by default
+    
+    # Load messages based on history limit:
+    # - None: Load all messages (default for scrollable clients like TUI)
+    # - 0: Load no messages
+    # - > 0: Load that many recent messages (for limited display like Telegram)
+    if history_limit == 0:
         messages = []
+    elif history_limit is None:
+        messages = MessagesDB.list_messages(new_session_id, limit=10000, offset=0)
     else:
         messages = MessagesDB.list_messages(new_session_id, limit=history_limit, offset=0)
     

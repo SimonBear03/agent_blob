@@ -211,12 +211,10 @@ class TUI:
         self.state.session_id = session_id
         self.state.session_title = title
         
-        # Load previous messages
+        # Load all previous messages (TUI is scrollable!)
         if messages:
             self.state.messages = []
-            # Only show last 4 messages for context
-            recent = messages[-4:] if len(messages) > 4 else messages
-            for msg in recent:
+            for msg in messages:
                 self.state.add_message(
                     role=msg.get("role"),
                     content=msg.get("content", "")

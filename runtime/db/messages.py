@@ -54,17 +54,24 @@ class MessagesDB:
     
     @staticmethod
     def list_messages(session_id: str, limit: int = 100, offset: int = 0) -> List[dict]:
-        """List all messages in a session ordered by created_at."""
+        """
+        List messages in a session ordered chronologically (oldest first).
+        
+        Uses DESC with LIMIT to get the most recent N messages,
+        then reverses to display in chronological order.
+        """
         db = get_db()
-        return db.fetchall(
+        messages = db.fetchall(
             """
             SELECT * FROM messages 
             WHERE session_id = ?
-            ORDER BY created_at ASC 
+            ORDER BY created_at DESC 
             LIMIT ? OFFSET ?
             """,
             (session_id, limit, offset)
         )
+        # Reverse to get chronological order (oldest -> newest)
+        return list(reversed(messages))
     
     @staticmethod
     def delete_message(message_id: str):

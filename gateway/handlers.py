@@ -79,6 +79,22 @@ async def handle_agent(
     
     message = params.message
     
+    # Context-aware session switching: if last command was /sessions and message is just a number,
+    # treat it as a session switch command
+    last_command = connection_manager.get_last_command(websocket)
+    if last_command == "sessions" and message.strip().isdigit():
+        # Convert numeric input to session switch after /sessions command
+        from .commands import handle_session_switch_command
+        connection_manager.clear_last_command(websocket)
+        await handle_session_switch_command(session_id, [message.strip()], websocket, connection_manager)
+        response = create_response(request.id, True, payload={"status": "command_processed"})
+        await websocket.send_json(response)
+        return
+    
+    # Clear last command if message is not numeric (user moved on to something else)
+    if last_command:
+        connection_manager.clear_last_command(websocket)
+    
     # Check if message is a command
     if message.startswith("/"):
         from .commands import handle_command
