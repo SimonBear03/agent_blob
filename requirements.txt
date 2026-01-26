@@ -1,0 +1,23 @@
+# Agent Blob v0.1.1 Dependencies
+# Install with: pip install -r requirements.txt
+
+# Web framework
+fastapi==0.128.0
+uvicorn[standard]==0.40.0
+
+# Data validation
+pydantic==2.12.5
+pydantic-settings==2.12.0
+
+# WebSocket
+websockets==12.0
+
+# OpenAI
+openai==2.15.0
+
+# Database
+aiosqlite==0.22.1
+
+# Utilities
+python-dotenv==1.0.1
+python-multipart==0.0.20
