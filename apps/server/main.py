@@ -20,10 +20,19 @@ app = FastAPI(
     version="0.1.0"
 )
 
-# CORS middleware
+# CORS middleware - Allow Tailscale access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        # Specific Tailscale IP
+        "http://100.117.142.1:3000",
+        # Tailscale domains (*.ts.net)
+        "http://*.ts.net:3000",
+        "https://*.ts.net:3000",
+    ],
+    allow_origin_regex=r"https?://(100\.\d{1,3}\.\d{1,3}\.\d{1,3}|.*\.ts\.net)(:\d+)?",  # Match Tailscale IPs and domains
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
