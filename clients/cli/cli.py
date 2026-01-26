@@ -65,7 +65,8 @@ class AgentBlobCLI:
             ui.console.print("[dim]Connecting to gateway...[/dim]")
             initial_session = await self.connection.connect(
                 client_type="cli",
-                session_preference=session_pref
+                session_preference=session_pref,
+                history_limit=20
             )
             
             # Setup event handlers

@@ -35,7 +35,7 @@ async def handle_command(
         await handle_new_command(session_id, websocket, connection_manager)
     
     elif cmd == "/sessions":
-        await handle_sessions_command(session_id, connection_manager)
+        await handle_sessions_command(session_id, args, websocket, connection_manager)
     
     elif cmd == "/switch" or cmd == "/session":
         await handle_session_switch_command(session_id, args, websocket, connection_manager)
@@ -60,6 +60,9 @@ async def handle_help_command(session_id: str, connection_manager: ConnectionMan
 **Session Management:**
 • `/new` - Create new conversation
 • `/sessions` - List recent sessions
+• `/sessions 2` or `/sessions page 2` - Show page 2
+• `/sessions next` / `/sessions prev` - Paginate
+• `/sessions search <keyword>` - Search sessions
 • `/switch <number>` - Switch to a session from the list
 • `/status` - Show current session info
 • `/help` - Show this help message
@@ -98,62 +101,121 @@ async def handle_new_command(
     )
 
 
-async def handle_sessions_command(session_id: str, connection_manager: ConnectionManager):
-    """List recent sessions."""
+async def handle_sessions_command(
+    session_id: str,
+    args: list,
+    websocket: WebSocket,
+    connection_manager: ConnectionManager
+):
+    """List recent sessions with pagination and search."""
     from runtime.db.sessions import SessionsDB
-    from runtime.db.messages import MessagesDB
     from datetime import datetime
-    import sqlite3
+    from math import ceil
     
-    # Get recent sessions from database (limit to 9 for display)
-    sessions = SessionsDB.list_sessions(limit=9, offset=0)
+    per_page = 9
+    page = 1
+    query = None
+    
+    # Restore last state if using next/prev
+    last_page, last_query = connection_manager.get_sessions_state(websocket)
+    
+    if args:
+        head = args[0].lower()
+        if head == "next":
+            page = last_page + 1
+            query = last_query
+        elif head == "prev":
+            page = max(1, last_page - 1)
+            query = last_query
+        elif head == "page" and len(args) > 1 and args[1].isdigit():
+            page = max(1, int(args[1]))
+        elif head == "search":
+            if len(args) < 2:
+                message = "Usage: `/sessions search <keyword>`"
+                await send_command_response(session_id, message, connection_manager)
+                return
+            # Allow optional trailing page number
+            if args[-1].isdigit() and len(args) > 2:
+                page = max(1, int(args[-1]))
+                query = " ".join(args[1:-1])
+            else:
+                query = " ".join(args[1:])
+        elif head.isdigit():
+            page = max(1, int(head))
+        else:
+            message = "Usage: `/sessions` | `/sessions 2` | `/sessions page 2` | `/sessions next` | `/sessions prev` | `/sessions search <keyword>`"
+            await send_command_response(session_id, message, connection_manager)
+            return
+    
+    offset = (page - 1) * per_page
+    
+    if query:
+        total = SessionsDB.count_sessions_search(query)
+        sessions = SessionsDB.search_sessions(query, limit=per_page, offset=offset)
+        header = f"📋 **Sessions matching:** `{query}`"
+    else:
+        total = SessionsDB.count_sessions()
+        sessions = SessionsDB.list_sessions(limit=per_page, offset=offset)
+        header = "📋 **Recent Sessions:**"
+    
+    total_pages = max(1, ceil(total / per_page)) if total > 0 else 1
+    if page > total_pages:
+        page = total_pages
+        offset = (page - 1) * per_page
+        sessions = SessionsDB.search_sessions(query, limit=per_page, offset=offset) if query else SessionsDB.list_sessions(limit=per_page, offset=offset)
     
     if not sessions:
-        message = """📋 **Recent Sessions:**
-
-No sessions found. This is your first conversation!"""
-    else:
-        lines = ["📋 **Recent Sessions:**\n"]
+        if query:
+            message = f"{header}\n\nNo sessions found."
+        else:
+            message = f"{header}\n\nNo sessions found. This is your first conversation!"
+        await send_command_response(session_id, message, connection_manager)
+        return
+    
+    lines = [header, f"\nPage {page}/{total_pages} • {total} total\n"]
+    
+    # Get message counts for all sessions in one query (more efficient)
+    from runtime.db import get_db
+    conn = get_db().get_connection()
+    cursor = conn.cursor()
+    
+    for idx, sess in enumerate(sessions, 1 + offset):
+        sess_id = sess["id"]
         
-        # Get message counts for all sessions in one query (more efficient)
-        from runtime.db import get_db
-        conn = get_db().get_connection()
-        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (sess_id,))
+        msg_count = cursor.fetchone()[0]
         
-        for idx, sess in enumerate(sessions, 1):
-            sess_id = sess["id"]
+        # Format time
+        try:
+            updated = datetime.fromisoformat(sess["updated_at"].replace("Z", "+00:00"))
+            now = datetime.utcnow()
+            delta = now - updated.replace(tzinfo=None)
             
-            # Get actual message count
-            cursor.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (sess_id,))
-            msg_count = cursor.fetchone()[0]
-            
-            # Format time
-            try:
-                updated = datetime.fromisoformat(sess["updated_at"].replace("Z", "+00:00"))
-                now = datetime.utcnow()
-                delta = now - updated.replace(tzinfo=None)
-                
-                if delta.total_seconds() < 60:
-                    time_str = "just now"
-                elif delta.total_seconds() < 3600:
-                    time_str = f"{int(delta.total_seconds() // 60)}m ago"
-                elif delta.days == 0:
-                    time_str = f"{int(delta.total_seconds() // 3600)}h ago"
-                elif delta.days == 1:
-                    time_str = "yesterday"
-                else:
-                    time_str = f"{delta.days}d ago"
-            except:
-                time_str = "unknown"
-            
-            title = sess["title"] or "Untitled"
-            current_marker = " ← current" if sess_id == session_id else ""
-            lines.append(f"{idx}. **{title}** • {msg_count} messages • {time_str}{current_marker}")
+            if delta.total_seconds() < 60:
+                time_str = "just now"
+            elif delta.total_seconds() < 3600:
+                time_str = f"{int(delta.total_seconds() // 60)}m ago"
+            elif delta.days == 0:
+                time_str = f"{int(delta.total_seconds() // 3600)}h ago"
+            elif delta.days == 1:
+                time_str = "yesterday"
+            else:
+                time_str = f"{delta.days}d ago"
+        except Exception:
+            time_str = "unknown"
         
-        conn.close()
-        
-        lines.append("\nType `/switch <number>` to switch sessions (e.g., `/switch 2`)")
-        message = "\n".join(lines)
+        title = sess["title"] or "Untitled"
+        current_marker = " ← current" if sess_id == session_id else ""
+        lines.append(f"{idx}. **{title}** • {msg_count} messages • {time_str}{current_marker}")
+    
+    conn.close()
+    
+    lines.append("\nType `/switch <number>` to switch sessions (e.g., `/switch 12`)")
+    lines.append("Use `/sessions next` or `/sessions prev` to page.")
+    message = "\n".join(lines)
+    
+    # Persist pagination state
+    connection_manager.set_sessions_state(websocket, page, query)
     
     await send_command_response(session_id, message, connection_manager)
 
@@ -178,14 +240,18 @@ async def handle_session_switch_command(
     if target.isdigit():
         # Switch by index
         idx = int(target) - 1  # Convert to 0-based
-        sessions = SessionsDB.list_sessions(limit=10, offset=0)
-        
-        if idx < 0 or idx >= len(sessions):
+        if idx < 0:
             message = f"❌ Invalid session number: {target}\n\nUse `/sessions` to see available sessions."
             await send_command_response(session_id, message, connection_manager)
             return
         
-        target_session = sessions[idx]
+        sessions = SessionsDB.list_sessions(limit=1, offset=idx)
+        if not sessions:
+            message = f"❌ Invalid session number: {target}\n\nUse `/sessions` to see available sessions."
+            await send_command_response(session_id, message, connection_manager)
+            return
+        
+        target_session = sessions[0]
         target_session_id = target_session["id"]
     else:
         # Switch by UUID
@@ -288,8 +354,16 @@ async def send_session_changed_event(
         logger.error(f"Cannot send session_changed: session {new_session_id} not found")
         return
     
-    # Get recent messages
-    messages = MessagesDB.list_messages(new_session_id, limit=50, offset=0)
+    # Get recent messages based on client history limit
+    # Safely resolve history limit (older gateways may not have the helper yet)
+    try:
+        history_limit = connection_manager.get_history_limit(websocket)
+    except AttributeError:
+        history_limit = 20
+    if history_limit <= 0:
+        messages = []
+    else:
+        messages = MessagesDB.list_messages(new_session_id, limit=history_limit, offset=0)
     
     # Estimate token usage for context window (rough: 1 token ~= 4 chars)
     total_chars = sum(len(msg.get("content", "")) for msg in messages)

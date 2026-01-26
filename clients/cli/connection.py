@@ -35,7 +35,12 @@ class GatewayConnection:
         self._pending_responses: Dict[str, asyncio.Future] = {}
         self._receive_task: Optional[asyncio.Task] = None
     
-    async def connect(self, client_type: str = "cli", session_preference: str = "auto") -> Dict[str, Any]:
+    async def connect(
+        self,
+        client_type: str = "cli",
+        session_preference: str = "auto",
+        history_limit: Optional[int] = None
+    ) -> Dict[str, Any]:
         """
         Connect to gateway and perform handshake.
         
@@ -51,15 +56,19 @@ class GatewayConnection:
             logger.info(f"Connected to {self.uri}")
             
             # Send connect request
+            params = {
+                "version": "1",
+                "clientType": client_type,
+                "sessionPreference": session_preference
+            }
+            if history_limit is not None:
+                params["historyLimit"] = history_limit
+
             connect_request = {
                 "type": "req",
                 "id": self._next_request_id(),
                 "method": "connect",
-                "params": {
-                    "version": "1",
-                    "clientType": client_type,
-                    "sessionPreference": session_preference
-                }
+                "params": params
             }
             
             await self.ws.send(json.dumps(connect_request))

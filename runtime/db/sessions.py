@@ -60,7 +60,7 @@ class SessionsDB:
         )
     
     @staticmethod
-    def search_sessions(query: str, limit: int = 10) -> List[dict]:
+    def search_sessions(query: str, limit: int = 10, offset: int = 0) -> List[dict]:
         """
         Search sessions by title or metadata.
         
@@ -73,9 +73,9 @@ class SessionsDB:
             SELECT * FROM sessions 
             WHERE title LIKE ? OR metadata LIKE ?
             ORDER BY updated_at DESC 
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (search_pattern, search_pattern, limit)
+            (search_pattern, search_pattern, limit, offset)
         )
     
     @staticmethod
@@ -172,3 +172,21 @@ class SessionsDB:
         conn.close()
         
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def count_sessions() -> int:
+        """Count total sessions."""
+        db = get_db()
+        row = db.fetchone("SELECT COUNT(*) as count FROM sessions")
+        return int(row["count"]) if row else 0
+
+    @staticmethod
+    def count_sessions_search(query: str) -> int:
+        """Count sessions matching search query."""
+        db = get_db()
+        search_pattern = f"%{query}%"
+        row = db.fetchone(
+            "SELECT COUNT(*) as count FROM sessions WHERE title LIKE ? OR metadata LIKE ?",
+            (search_pattern, search_pattern)
+        )
+        return int(row["count"]) if row else 0

@@ -49,27 +49,37 @@ class SimpleTUI:
     def clear_screen(self):
         """Clear the screen."""
         os.system('clear' if os.name != 'nt' else 'cls')
+
+    def _print_status_block(self):
+        """Print a stationary-looking status/input block."""
+        status_icon = "●" if self.status_color == "green" else "⏳" if self.status_color == "yellow" else "🔧"
+        context_pct = (self.tokens_used / self.tokens_limit * 100) if self.tokens_limit > 0 else 0
+        context_color = "green" if context_pct < 60 else "yellow" if context_pct < 85 else "red"
+        tokens_k = self.tokens_used / 1000
+        limit_k = self.tokens_limit / 1000
+        context_str = f"{tokens_k:.1f}K/{limit_k:.0f}K ({context_pct:.0f}%)"
+        status_line = (
+            f"{status_icon} {self.status} │ 📝 {self.message_count} msgs │ 🤖 {self.model_name} "
+            f"│ [{context_color}]📊 {context_str}[/{context_color}]"
+        )
+        hint_line = "Ctrl+J = new line │ Ctrl+C = quit │ /help"
+        console.print(f"[dim]{'─' * console.width}[/dim]")
+        console.print(status_line)
+        console.print(f"[dim]{hint_line}[/dim]")
     
     def render_full(self):
         """Render the full UI."""
         self.clear_screen()
-        
-        # Header
-        header = Text()
-        header.append("Agent Blob", style="bold cyan")
         if self.session_title:
-            header.append(f" - {self.session_title}", style="white")
-        if self.session_id:
-            header.append(f" ({self.session_id[:8]}...)", style="dim")
-        console.print(Panel(header, border_style="cyan"))
-        console.print()
+            session_id = f"{self.session_id[:8]}..." if self.session_id else "unknown"
+            console.print(f"[dim]Session: {self.session_title} ({session_id})[/dim]")
+            console.print(f"[dim]{'─' * console.width}[/dim]\n")
         
         # Messages
         if not self.messages:
             console.print("[dim italic]No messages yet. Start chatting below![/dim italic]\n")
         else:
-            # Show last 20 messages
-            for i, msg in enumerate(self.messages[-20:]):
+            for i, msg in enumerate(self.messages):
                 role = msg.get("role")
                 content = msg.get("content", "")
                 streaming = msg.get("streaming", False)
@@ -89,39 +99,13 @@ class SimpleTUI:
                     console.print(display_content)
                 
                 # Add spacing between messages
-                if i < len(self.messages[-20:]) - 1:
+                if i < len(self.messages) - 1:
                     console.print()
         
         console.print()
-        
-        # Status bar with detailed info
-        status_icon = "●" if self.status_color == "green" else "⏳" if self.status_color == "yellow" else "🔧"
-        
-        # Calculate context percentage
-        context_pct = (self.tokens_used / self.tokens_limit * 100) if self.tokens_limit > 0 else 0
-        context_color = "green" if context_pct < 60 else "yellow" if context_pct < 85 else "red"
-        
-        # Format context display
-        tokens_k = self.tokens_used / 1000
-        limit_k = self.tokens_limit / 1000
-        context_str = f"{tokens_k:.1f}K/{limit_k:.0f}K ({context_pct:.0f}%)"
-        
-        # Build status line
-        status_parts = [
-            f"[{self.status_color}]{status_icon} {self.status}[/{self.status_color}]",
-            f"[dim]│[/dim] 📝 {self.message_count} msgs",
-            f"[dim]│[/dim] 🤖 {self.model_name}",
-            f"[dim]│[/dim] [{context_color}]📊 {context_str}[/{context_color}]"
-        ]
-        
-        console.print(Panel(
-            " ".join(status_parts),
-            border_style=self.status_color
-        ))
-        console.print()
-        
-        # Input hint
-        console.print("[dim]Ctrl+J = new line │ Ctrl+C = quit │ Type [/dim][cyan]/help[/cyan][dim] for commands[/dim]")
+
+        # Status + input block
+        self._print_status_block()
     
     def add_user_message(self, content: str):
         """Add user message."""
@@ -171,18 +155,17 @@ class SimpleTUI:
         """Set session."""
         self.session_id = session_id
         self.session_title = title
-        
+        self.messages = []
         if messages:
-            self.messages = []
             self.message_count = len(messages)
-            # Show last 4 for context
-            recent = messages[-4:] if len(messages) > 4 else messages
-            for msg in recent:
+            for msg in messages:
                 self.messages.append({
                     "role": msg.get("role"),
                     "content": msg.get("content", ""),
                     "streaming": False
                 })
+        else:
+            self.message_count = 0
         
         self.render_full()
     
@@ -263,7 +246,8 @@ class AgentBlobTUI:
             console.print("[dim]Connecting to gateway...[/dim]")
             initial_session = await self.connection.connect(
                 client_type="tui",
-                session_preference=session_pref
+                session_preference=session_pref,
+                history_limit=20
             )
             
             # Setup event handlers

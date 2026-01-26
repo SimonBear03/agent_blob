@@ -143,6 +143,7 @@ async def websocket_endpoint(websocket: WebSocket):
         client_type = request.params.get("clientType", "unknown")
         protocol_version = request.params.get("version", "1")
         session_preference = request.params.get("sessionPreference", "auto")  # "auto", "new", or "continue"
+        history_limit = request.params.get("historyLimit")
         
         if protocol_version != "1":
             error_response = create_response(
@@ -183,7 +184,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.info(f"Created first session: {session_id[:8]}...")
         
         # Add client to connection manager
-        connection_manager.add_client(session_id, websocket, client_type)
+        connection_manager.add_client(session_id, websocket, client_type, history_limit=history_limit)
         
         # Send success response
         connect_response = create_response(
@@ -206,7 +207,15 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Send initial session_changed event with session info and message history
         session = SessionsDB.get_session(session_id)
-        messages = MessagesDB.list_messages(session_id, limit=50, offset=0)
+        # Safely resolve history limit (older gateways may not have the helper yet)
+        try:
+            effective_history_limit = connection_manager.get_history_limit(websocket)
+        except AttributeError:
+            effective_history_limit = 20
+        if effective_history_limit <= 0:
+            messages = []
+        else:
+            messages = MessagesDB.list_messages(session_id, limit=effective_history_limit, offset=0)
         
         # Estimate token usage for context window (rough: 1 token ~= 4 chars)
         total_chars = sum(len(msg.get("content", "")) for msg in messages)

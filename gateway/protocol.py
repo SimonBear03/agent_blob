@@ -72,6 +72,8 @@ class ConnectParams(BaseModel):
     """Parameters for connect method."""
     version: str
     clientType: str  # "web", "cli", "telegram"
+    sessionPreference: Optional[str] = None
+    historyLimit: Optional[int] = None
 
 
 class AgentParams(BaseModel):

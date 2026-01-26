@@ -16,6 +16,9 @@ class ClientInfo:
     websocket: WebSocket
     client_type: str  # "web", "cli", "telegram"
     session_id: str
+    history_limit: Optional[int] = None
+    sessions_page: int = 1
+    sessions_query: Optional[str] = None
 
 
 class ConnectionManager:
@@ -32,13 +35,31 @@ class ConnectionManager:
             "cli": "📱",
             "telegram": "💬"
         }
+        self.default_history_limits = {
+            "tui": 20,
+            "cli": 20,
+            "web": 20,
+            "telegram": 4
+        }
     
-    def add_client(self, session_id: str, websocket: WebSocket, client_type: str):
+    def add_client(
+        self,
+        session_id: str,
+        websocket: WebSocket,
+        client_type: str,
+        history_limit: Optional[int] = None
+    ):
         """Add a new client connection."""
+        resolved_history_limit = (
+            history_limit
+            if history_limit is not None
+            else self.default_history_limits.get(client_type, 20)
+        )
         client_info = ClientInfo(
             websocket=websocket,
             client_type=client_type,
-            session_id=session_id
+            session_id=session_id,
+            history_limit=resolved_history_limit
         )
         self.active_connections[session_id].append(client_info)
         self.ws_to_client[websocket] = client_info
@@ -63,6 +84,28 @@ class ConnectionManager:
     def get_client_info(self, websocket: WebSocket) -> Optional[ClientInfo]:
         """Get client info for a websocket."""
         return self.ws_to_client.get(websocket)
+
+    def get_history_limit(self, websocket: WebSocket) -> int:
+        """Get history limit for a websocket."""
+        client_info = self.ws_to_client.get(websocket)
+        if client_info and client_info.history_limit is not None:
+            return client_info.history_limit
+        return 20
+
+    def get_sessions_state(self, websocket: WebSocket) -> tuple[int, Optional[str]]:
+        """Get last sessions page and query for a websocket."""
+        client_info = self.ws_to_client.get(websocket)
+        if not client_info:
+            return (1, None)
+        return (client_info.sessions_page, client_info.sessions_query)
+
+    def set_sessions_state(self, websocket: WebSocket, page: int, query: Optional[str]):
+        """Set last sessions page and query for a websocket."""
+        client_info = self.ws_to_client.get(websocket)
+        if not client_info:
+            return
+        client_info.sessions_page = page
+        client_info.sessions_query = query
     
     def get_session_clients(self, session_id: str) -> List[ClientInfo]:
         """Get all clients connected to a session."""
