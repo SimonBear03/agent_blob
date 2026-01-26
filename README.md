@@ -1,192 +1,284 @@
 # Agent Blob
 
-A local-first AI agent system with structured memory, tool execution, and PKM integration.
+A local-first AI agent system with structured memory, tool execution, and universal multi-client support.
+
+**Version:** 0.1.1 (WebSocket-based architecture)
 
 ## Architecture
 
-Agent Blob is a monorepo containing:
+Agent Blob v0.1.1 uses a **WebSocket-only** architecture inspired by Clawdbot, enabling real-time streaming and multi-client support.
 
-- **apps/web**: Next.js frontend for chat interface, memory management, and settings
-- **apps/server**: FastAPI backend with agent loop, tool registry, SQLite storage, and PKM export
-- **shared/**: Shared resources (prompts, skills, schemas)
+### Components
+
+- **apps/gateway**: WebSocket gateway for universal client access (Web, CLI, Telegram)
+- **apps/agent_runtime**: Event-streaming agent with tool execution and process management  
+- **apps/web**: Next.js frontend (⚠️ needs migration to WebSocket - see `apps/web/MIGRATION_NEEDED.md`)
+- **shared/**: Protocol specs, prompts, and schemas
+
+### Architecture Diagram
 
 ```
-┌─────────┐
-│  User   │
-└────┬────┘
-     │
-┌────▼────────────────────────┐
-│  Next.js Web UI             │
-│  - Chat interface           │
-│  - Pinned memory editor     │
-│  - Settings                 │
-└────┬────────────────────────┘
-     │ HTTP
-┌────▼────────────────────────┐
-│  FastAPI Server             │
-│  ┌─────────────────────┐    │
-│  │  Agent Loop         │    │
-│  │  (System Prompt +   │    │
-│  │   Active Skills)    │◄───┼─── Skills (PKM, etc.)
-│  └──────┬──────────────┘    │
-│         │                   │
-│  ┌──────▼──────────────┐    │
-│  │  Tool Registry      │    │
-│  │  - filesystem.read  │    │
-│  │  - filesystem.write │    │
-│  │  - filesystem.list  │    │
-│  │  - memory.*         │    │
-│  └──────┬──────────────┘    │
-│         │                   │
-│  ┌──────▼──────────────┐    │
-│  │  SQLite Database    │    │
-│  │  - threads          │    │
-│  │  - messages         │    │
-│  │  - pinned_memory    │    │
-│  │  - audit_log        │    │
-│  └─────────────────────┘    │
-│         │                   │
-│  ┌──────▼──────────────┐    │
-│  │  OpenAI-compatible  │    │
-│  │  API (gpt-4o, etc.) │    │
-│  └─────────────────────┘    │
-└─────────────────────────────┘
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│   Web UI     │  │   CLI Client │  │ Telegram Bot │
+│  (Browser)   │  │   (Python)   │  │   (Python)   │
+└──────┬───────┘  └──────┬───────┘  └──────┬───────┘
+       │                 │                  │
+       └─────────────────┴──────────────────┘
+                         │ WebSocket
+                         │ (Protocol v1)
+              ┌──────────▼──────────┐
+              │  Gateway            │
+              │  - Connection mgr   │
+              │  - Multi-client     │
+              │  - Request queue    │
+              │  - Commands         │
+              └──────────┬──────────┘
+                         │ Event Stream
+              ┌──────────▼──────────┐
+              │  Agent Runtime      │
+              │  - Event generator  │
+              │  - Tool registry    │
+              │  - Process manager  │
+              └──────────┬──────────┘
+                         │
+       ┌─────────────────┼─────────────────┐
+       │                 │                 │
+┌──────▼─────┐  ┌────────▼────────┐  ┌────▼──────┐
+│  OpenAI    │  │  SQLite DB      │  │ Processes │
+│  GPT-4o    │  │  - sessions     │  │  Tracking │
+│            │  │  - messages     │  │           │
+│            │  │  - memory       │  │           │
+└────────────┘  └─────────────────┘  └───────────┘
 ```
 
 ## Key Features
 
-- **Local-first**: All data stored in local SQLite database
-- **Structured memory**: Persistent pinned memory + full conversation history
-- **Tool registry**: General-purpose tools (filesystem, memory, etc.) with safety boundaries
-- **Skills system**: Modular prompt extensions for specialized workflows (e.g., PKM note creation)
-- **Audit logging**: Complete audit trail of all tool executions
-- **PKM integration**: Skills can use filesystem tools to create notes in your PKM vault
+- **WebSocket Protocol**: Universal transport for all clients (Web, CLI, Telegram)
+- **Multi-Client Support**: Multiple clients can connect to the same session
+- **Real-Time Streaming**: Token-by-token streaming from GPT-4o
+- **Session Management**: Search, list, and switch between conversation sessions
+- **Tool Execution**: Filesystem, memory, session search, and process management
+- **Process Tracking**: Monitor and cancel long-running operations
+- **Request Queueing**: Per-session FIFO queue with immediate feedback
+- **Local-First**: All data stored in SQLite, no cloud dependencies
 
-## Safety Boundaries
-
-1. **Filesystem access**: All filesystem tools constrained to `ALLOWED_FS_ROOT`
-2. **No delete operations**: Filesystem tools support read, write, and list only
-3. **Audit logging**: All tool calls logged with timestamp, inputs, outputs
-4. **Server-side API keys**: API keys never exposed to frontend
-5. **Skills-based workflows**: Complex operations like PKM export are implemented as skills that use general tools
-
-## Local Development Setup
+## Quick Start
 
 ### Prerequisites
 
-- Python 3.10+ with pip
-- Node.js 18+ with npm
-- OpenAI API key (or compatible API)
+- Python 3.11+
+- OpenAI API key (or compatible endpoint)
+- Node.js 18+ (for Web UI, optional)
 
-### 1. Clone and configure
-
-```bash
-git clone <your-repo-url>
-cd agent_blob
-
-# Copy example env file and configure
-cp .env.example .env
-# Edit .env with your actual values:
-# - OPENAI_API_KEY
-# - PKM_ROOT (path to your PKM vault - agent can write notes here)
-# - ALLOWED_FS_ROOT (safe workspace path for general filesystem access)
-```
-
-### 2. Set up FastAPI server
+### 1. Install Dependencies
 
 ```bash
-cd apps/server
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
+# Install Python dependencies
 pip install -r requirements.txt
 
-# Initialize database (automatic on first run)
-# Run server
-uvicorn main:app --reload --host 127.0.0.1 --port 8000
+# Or with SSL certificate issues on macOS:
+pip install --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org -r requirements.txt
 ```
 
-Server will be available at `http://127.0.0.1:8000`
-
-API docs: `http://127.0.0.1:8000/docs`
-
-### 3. Set up Next.js web app
+### 2. Configure API Key
 
 ```bash
-cd apps/web
+# Copy environment template
+cp .env.example .env
 
-# Install dependencies
-npm install
-
-# Run development server
-npm run dev
+# Edit .env and add your OpenAI API key
+# OPENAI_API_KEY=sk-your-key-here
 ```
 
-Web app will be available at `http://localhost:3000`
+### 3. Start the Gateway
 
-### 4. Usage
+```bash
+# Start the WebSocket gateway
+python run_gateway.py
 
-1. Open `http://localhost:3000` in your browser
-2. Configure API key in Settings (if not set in server .env)
-3. Create a new chat thread
-4. Start conversing with the agent
-5. Agent can use general tools (filesystem read/write/list, memory management)
-6. Ask agent to create PKM notes - the PKM skill will use filesystem tools to write notes to your vault
+# Gateway will be available at:
+# WebSocket: ws://127.0.0.1:3336/ws
+# Health: http://127.0.0.1:3336/health
+```
+
+### 4. Test It
+
+```bash
+# In a new terminal, test the connection
+python test_client.py
+
+# Or test tool execution
+python test_tools.py
+```
+
+## Available Tools
+
+The agent has access to:
+
+1. **Filesystem**
+   - `filesystem.read` - Read files with workspace constraints
+   - `filesystem.write` - Write files safely
+   - `filesystem.list` - List directory contents
+
+2. **Memory**
+   - `memory.set` - Store persistent memory
+   - `memory.get` - Retrieve memory
+   - `memory.list` - List all memory
+
+3. **Sessions**
+   - `sessions.search` - Search conversations by keywords
+   - `sessions.list` - List recent sessions
+   - `sessions.get` - Get session details
+
+4. **Processes**
+   - `process.list` - List running processes
+   - `process.status` - Check process status
+   - `process.cancel` - Cancel a process
+   - `process.wait_time` - Get wait time estimate
+
+## WebSocket Protocol
+
+Agent Blob uses a custom WebSocket protocol (v1) for all communication. See `shared/protocol/protocol_v1.md` for the complete specification.
+
+### Connection Flow
+
+1. **Connect**: Client sends `connect` request with version and client type
+2. **Session**: Gateway creates or resumes a session
+3. **Messages**: Client sends messages via `agent` method
+4. **Events**: Gateway streams events (tokens, tool calls, status, etc.)
+5. **Commands**: Client can use gateway commands (`/help`, `/sessions`, etc.)
+
+### Example
+
+```javascript
+// Connect
+ws.send(JSON.stringify({
+  type: "req",
+  id: "conn-1",
+  method: "connect",
+  params: { version: "1", clientType: "web" }
+}));
+
+// Send message
+ws.send(JSON.stringify({
+  type: "req",
+  id: "msg-1",
+  method: "agent",
+  params: { sessionId: "session-id", message: "Hello!" }
+}));
+
+// Receive events
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  if (data.event === "token") {
+    console.log(data.payload.content); // Stream tokens
+  }
+};
+```
+
+## Multi-Client Support
+
+Multiple clients can connect to the same session simultaneously. All events are broadcast to all connected clients:
+
+- **User messages**: Broadcast with sender indication (Web/CLI/Telegram)
+- **Agent responses**: Broadcast identically to all clients
+- **Tool execution**: All clients see tool calls and results
+
+Telegram clients receive messages prefixed with source:
+```
+🖥️ [From Web UI] Hello from the web interface!
+```
+
+## Gateway Commands
+
+Commands are messages starting with `/` that are processed by the gateway:
+
+- `/help` - Show available commands
+- `/new` - Create a new session
+- `/sessions` - List recent sessions
+- `/session <id>` - Switch to a session
+- `/history [count]` - Show message history
+- `/status` - Show gateway and session status
 
 ## Project Structure
 
 ```
 agent_blob/
 ├── apps/
-│   ├── server/              # FastAPI backend
-│   │   ├── main.py          # FastAPI app entry point
-│   │   ├── agent/           # Agent loop logic
-│   │   ├── db/              # SQLite layer
-│   │   ├── tools/           # Tool registry and general-purpose tools
-│   │   └── schemas/         # Pydantic models
-│   └── web/                 # Next.js frontend
-│       ├── app/             # App router pages
-│       ├── components/      # React components
-│       └── lib/             # API client utilities
+│   ├── gateway/              # WebSocket gateway
+│   │   ├── main.py          # FastAPI app
+│   │   ├── protocol.py      # Pydantic models
+│   │   ├── connections.py   # Multi-client manager
+│   │   ├── queue.py         # Request queue
+│   │   ├── handlers.py      # Method routing
+│   │   └── commands.py      # Command processing
+│   │
+│   ├── agent_runtime/        # Agent runtime
+│   │   ├── runtime.py       # Event generator
+│   │   ├── processes.py     # Process manager
+│   │   ├── db/              # Database layer
+│   │   └── tools/           # Tool registry
+│   │
+│   └── web/                  # Web UI (needs migration)
+│
 ├── shared/
-│   ├── prompts/             # System prompts
-│   ├── skills/              # Agent skills (PKM, workflows, etc.)
-│   └── schemas/             # JSON schemas for tools
-├── .env.example             # Environment variable template
-├── .gitignore
-└── README.md
+│   ├── protocol/             # Protocol specs
+│   └── prompts/              # System prompts
+│
+├── run_gateway.py            # Start script
+├── test_client.py            # Basic test client
+├── test_tools.py             # Tool execution test
+├── requirements.txt          # Python dependencies
+├── QUICKSTART.md             # Quick start guide
+└── TODO_v0.1.1.md           # Implementation plan
 ```
 
-## Technology Stack
+## Development Status
 
-### Backend (apps/server)
-- **FastAPI**: Modern Python web framework
-- **SQLite**: Local-first database
-- **OpenAI SDK**: LLM API integration with function calling
-- **Pydantic**: Data validation and schemas
+**Version 0.1.1**: Core infrastructure complete (10/15 tasks)
 
-### Frontend (apps/web)
-- **Next.js 14**: React framework with App Router
-- **TypeScript**: Type-safe development
-- **Tailwind CSS**: Utility-first styling
-- **shadcn/ui**: Component library (optional)
+✅ Complete:
+- WebSocket protocol and gateway
+- Multi-client connection manager
+- Request queueing and broadcast
+- Agent runtime as event generator
+- Process management and tracking
+- Session and process tools
+- Filesystem and memory tools
 
-## Development Roadmap
+⏳ In Progress:
+- Web UI migration to WebSocket
+- CLI client improvements
+- Tests and documentation
 
-- [x] Monorepo scaffold
-- [x] SQLite schema and initialization
-- [x] Tool registry pattern
-- [x] Basic filesystem tools (read, write, list)
-- [x] Memory management tools
-- [x] OpenAI integration with function calling
-- [x] PKM skill (uses filesystem tools to create notes)
-- [x] FastAPI endpoints (threads, chat, memory, settings)
-- [x] Next.js basic UI
-- [ ] Streaming responses
-- [ ] Additional skills (web search, code analysis, etc.)
-- [ ] Multi-model support
-- [ ] Additional general tools (search, diff, etc.)
-- [ ] Skills marketplace/sharing
+See `PROGRESS.md` for detailed status.
+
+## Documentation
+
+- `QUICKSTART.md` - Quick start guide
+- `INSTALL.md` - Installation instructions
+- `PROGRESS.md` - Development progress
+- `TODO_v0.1.1.md` - Detailed implementation plan
+- `shared/protocol/protocol_v1.md` - WebSocket protocol specification
+- `apps/web/MIGRATION_NEEDED.md` - Web UI migration guide
+
+## License
+
+MIT
+
+## Changelog
+
+### v0.1.1 (Current)
+- Complete architectural rewrite to WebSocket-only
+- Multi-client support with broadcasting
+- Session-based conversations (replacing threads)
+- Process management and tracking
+- Real-time event streaming
+- Gateway commands
+- Session and process tools for LLM
+
+### v0.1.0
+- Initial HTTP-based implementation
+- Basic chat with tool execution
+- Thread-based conversations
+- Filesystem and memory tools

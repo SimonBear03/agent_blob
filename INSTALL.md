@@ -23,7 +23,7 @@ OPENAI_API_KEY=your_openai_api_key_here
 # Optional
 MODEL_NAME=gpt-4o
 GATEWAY_HOST=127.0.0.1
-GATEWAY_PORT=18789
+GATEWAY_PORT=3336
 DB_PATH=./data/agent_blob.db
 ```
 
@@ -35,16 +35,16 @@ python run_gateway.py
 
 You should see:
 ```
-🚀 Starting Agent Blob Gateway on 127.0.0.1:18789
-📡 WebSocket endpoint: ws://127.0.0.1:18789/ws
-🔍 Health check: http://127.0.0.1:18789/health
+🚀 Starting Agent Blob Gateway on 127.0.0.1:3336
+📡 WebSocket endpoint: ws://127.0.0.1:3336/ws
+🔍 Health check: http://127.0.0.1:3336/health
 ```
 
 ### 4. Test the Gateway
 
 **Health Check:**
 ```bash
-curl http://127.0.0.1:18789/health
+curl http://127.0.0.1:3336/health
 ```
 
 **WebSocket Test (using websocat):**
@@ -52,7 +52,7 @@ curl http://127.0.0.1:18789/health
 # Install websocat first: brew install websocat
 
 # Connect and send messages
-websocat ws://127.0.0.1:18789/ws
+websocat ws://127.0.0.1:3336/ws
 ```
 
 Then send:

@@ -31,7 +31,7 @@ python test_client.py
 
 You should see:
 ```
-🔌 Connecting to ws://127.0.0.1:18789/ws...
+🔌 Connecting to ws://127.0.0.1:3336/ws...
 📤 Sending connect request...
 📥 Received: {...}
 ✅ Connected! Session ID: abc12345...
@@ -44,7 +44,7 @@ You should see:
 brew install websocat
 
 # Connect to gateway
-websocat ws://127.0.0.1:18789/ws
+websocat ws://127.0.0.1:3336/ws
 ```
 
 Then paste:

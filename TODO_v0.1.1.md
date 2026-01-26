@@ -9,7 +9,7 @@ This release transforms `agent_blob` into a **Clawdbot-style universal gateway**
 - Clients (Web UI, CLI, Telegram) are **thin adapters** that only connect to WebSocket and forward messages
 - One process, one daemon, universal protocol
 
-**Transport**: WebSocket (ws://localhost:18789)
+**Transport**: WebSocket (ws://localhost:3336)
 
 ## Core Philosophy (Learned from Clawdbot)
 
@@ -752,7 +752,7 @@ Gateway intercepts commands, processes them, and sends appropriate response even
 
 - [ ] **C1. Add WebSocket client**
   - [ ] Create `apps/web/lib/websocket.ts`
-  - [ ] Connect to `ws://localhost:18789/ws`
+  - [ ] Connect to `ws://localhost:3336/ws`
   - [ ] Send `connect` frame with version and clientType
   - [ ] Handle reconnection on drop (exponential backoff)
   - [ ] Implement ping/pong heartbeat
@@ -805,7 +805,7 @@ Gateway intercepts commands, processes them, and sends appropriate response even
     - [ ] `agent-cli --new "message"` - create new session
     - [ ] `agent-cli --sessions` - list recent sessions
     - [ ] `agent-cli --history [count]` - show session history
-  - [ ] Connect to WebSocket at `ws://localhost:18789/ws`
+  - [ ] Connect to WebSocket at `ws://localhost:3336/ws`
   - [ ] Send `connect` handshake
 
 - [ ] **D2. Event handling & display**
