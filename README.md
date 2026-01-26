@@ -10,9 +10,10 @@ Agent Blob v0.1.1 uses a **WebSocket-only** architecture inspired by Clawdbot, e
 
 ### Components
 
-- **apps/gateway**: WebSocket gateway for universal client access (Web, CLI, Telegram)
-- **apps/agent_runtime**: Event-streaming agent with tool execution and process management  
-- **apps/web**: Next.js frontend (⚠️ needs migration to WebSocket - see `apps/web/MIGRATION_NEEDED.md`)
+- **gateway/**: WebSocket gateway for universal client access (Web, CLI, Telegram)
+- **runtime/**: Event-streaming agent with tool execution and process management
+- **clients/**: Client implementations
+  - **cli/**: TUI (Text User Interface) - modern terminal client with split-screen layout
 - **shared/**: Protocol specs, prompts, and schemas
 
 ### Architecture Diagram
@@ -54,12 +55,15 @@ Agent Blob v0.1.1 uses a **WebSocket-only** architecture inspired by Clawdbot, e
 ## Key Features
 
 - **WebSocket Protocol**: Universal transport for all clients (Web, CLI, Telegram)
-- **Multi-Client Support**: Multiple clients can connect to the same session
-- **Real-Time Streaming**: Token-by-token streaming from GPT-4o
-- **Session Management**: Search, list, and switch between conversation sessions
+- **Multi-Client Support**: Multiple clients can connect to the same session simultaneously
+- **Real-Time Streaming**: Token-by-token streaming from GPT-4o with status updates
+- **Session Management**: Search, list, paginate, and switch between conversation sessions
+- **Gateway Commands**: Built-in commands (`/sessions`, `/switch`, `/new`, `/help`, etc.)
+- **Modern TUI Client**: Split-screen terminal interface with persistent history and status bar
 - **Tool Execution**: Filesystem, memory, session search, and process management
 - **Process Tracking**: Monitor and cancel long-running operations
-- **Request Queueing**: Per-session FIFO queue with immediate feedback
+- **Request Queueing**: Per-session FIFO queue with cancellation support
+- **Configurable History**: Per-client message history limits (4-20 messages)
 - **Local-First**: All data stored in SQLite, no cloud dependencies
 
 ## Quick Start
@@ -101,10 +105,29 @@ python run_gateway.py
 # Health: http://127.0.0.1:3336/health
 ```
 
-### 4. Test It
+### 4. Start the TUI Client
 
 ```bash
-# In a new terminal, test the connection
+# In a new terminal, start the TUI
+python run_cli.py
+
+# The TUI will connect and show:
+# - Contextual welcome message
+# - Your conversation history (last 20 messages)
+# - Status bar with model, tokens, message count
+# - Input prompt at the bottom
+
+# Try these commands:
+# /help - Show all available commands
+# /sessions - List your sessions
+# /new - Create a new session
+# /status - Show current session stats
+```
+
+### 5. Test Basic Connection (Optional)
+
+```bash
+# Test raw WebSocket connection
 python test_client.py
 
 # Or test tool execution
@@ -193,74 +216,143 @@ Telegram clients receive messages prefixed with source:
 
 Commands are messages starting with `/` that are processed by the gateway:
 
-- `/help` - Show available commands
+### Session Management
+- `/sessions` - List recent sessions (page 1, 9 per page)
+- `/sessions <n>` - Show page N of sessions
+- `/sessions next` / `/sessions prev` - Navigate through pages
+- `/sessions search <keyword>` - Search sessions by title or content
+- `/switch <n>` - Switch to session number N from the list
 - `/new` - Create a new session
-- `/sessions` - List recent sessions
-- `/session <id>` - Switch to a session
-- `/history [count]` - Show message history
-- `/status` - Show gateway and session status
+
+### Information
+- `/help` - Show all available commands
+- `/status` - Show current session stats (ID, messages, model, queue)
+- `/history [count]` - Show message history (default: 20)
+
+**Note**: Commands are handled by the gateway and work identically across all clients (TUI, Web, Telegram, etc.)
 
 ## Project Structure
 
 ```
 agent_blob/
-├── apps/
-│   ├── gateway/              # WebSocket gateway
-│   │   ├── main.py          # FastAPI app
-│   │   ├── protocol.py      # Pydantic models
-│   │   ├── connections.py   # Multi-client manager
-│   │   ├── queue.py         # Request queue
-│   │   ├── handlers.py      # Method routing
-│   │   └── commands.py      # Command processing
-│   │
-│   ├── agent_runtime/        # Agent runtime
-│   │   ├── runtime.py       # Event generator
-│   │   ├── processes.py     # Process manager
-│   │   ├── db/              # Database layer
-│   │   └── tools/           # Tool registry
-│   │
-│   └── web/                  # Web UI (needs migration)
+├── gateway/                  # WebSocket gateway
+│   ├── main.py              # FastAPI app with /ws endpoint
+│   ├── protocol.py          # Pydantic models for requests/responses/events
+│   ├── connections.py       # Multi-client connection manager
+│   ├── queue.py             # Per-session request queue
+│   ├── handlers.py          # Method routing (agent, sessions, status)
+│   ├── commands.py          # Command processing (/sessions, /switch, etc.)
+│   └── requirements.txt
+│
+├── runtime/                  # Agent runtime
+│   ├── runtime.py           # Event-streaming agent loop
+│   ├── processes.py         # Process manager
+│   ├── db/                  # Database layer
+│   │   ├── sessions.py      # Session CRUD + search
+│   │   ├── messages.py      # Message CRUD
+│   │   ├── memory.py        # Memory CRUD
+│   │   └── audit.py         # Audit logging
+│   └── tools/               # Tool implementations
+│       ├── filesystem.py    # File read/write/list
+│       ├── memory_tools.py  # Memory set/get/list
+│       ├── session_tools.py # Session search/list/get
+│       └── process_tools.py # Process list/status/cancel/wait_time
+│
+├── clients/                  # Client implementations
+│   └── cli/                 # CLI/TUI client
+│       ├── cli_tui.py       # Modern TUI with split-screen layout
+│       ├── tui.py           # UI components (experimental)
+│       ├── ui.py            # Shared UI utilities
+│       ├── connection.py    # WebSocket connection wrapper
+│       ├── README.md        # CLI client documentation
+│       └── README_TUI.md    # TUI mode details
 │
 ├── shared/
-│   ├── protocol/             # Protocol specs
-│   └── prompts/              # System prompts
+│   ├── protocol/            # Protocol specs
+│   │   ├── protocol_v1.md   # Full WebSocket protocol spec
+│   │   ├── request.schema.json
+│   │   ├── response.schema.json
+│   │   └── event.schema.json
+│   ├── prompts/
+│   │   └── system.md        # System prompt
+│   └── schemas/
+│       └── tool_schema.json # Tool definitions
 │
-├── run_gateway.py            # Start script
-├── test_client.py            # Basic test client
-├── test_tools.py             # Tool execution test
-├── requirements.txt          # Python dependencies
-├── QUICKSTART.md             # Quick start guide
-└── TODO_v0.1.1.md           # Implementation plan
+├── docs/                     # Documentation
+│   ├── ARCHITECTURE.md      # "Dumb client" architecture
+│   ├── CLIENT_DESIGN.md     # Client implementation guide
+│   └── TUI_IMPLEMENTATION.md # TUI implementation details
+│
+├── scripts/
+│   ├── run_gateway.py       # Gateway startup script
+│   └── cleanup_sessions.py  # Database maintenance
+│
+├── tests/
+│   ├── test_client.py       # Basic WebSocket test
+│   └── test_tools.py        # Tool execution test
+│
+├── data/                     # SQLite database (created on first run)
+│   └── agent_blob.db
+│
+├── run_cli.py               # TUI client launcher
+├── requirements.txt         # Python dependencies
+├── QUICKSTART.md            # Quick start guide
+├── PROGRESS.md              # Development progress
+└── TODO_v0.1.1.md          # Implementation plan
 ```
 
 ## Development Status
 
-**Version 0.1.1**: Core infrastructure complete (10/15 tasks)
+**Version 0.1.1**: Core infrastructure complete
 
 ✅ Complete:
 - WebSocket protocol and gateway
-- Multi-client connection manager
-- Request queueing and broadcast
+- Multi-client connection manager with broadcasting
+- Request queueing, cancellation, and per-session queue
 - Agent runtime as event generator
 - Process management and tracking
-- Session and process tools
+- Session tools (search, list, get with pagination)
+- Gateway commands (/sessions, /switch, /new, /help, /status)
 - Filesystem and memory tools
+- Modern TUI client with split-screen layout
+- History limiting per client type
+- Session statistics and token tracking
 
-⏳ In Progress:
-- Web UI migration to WebSocket
-- CLI client improvements
-- Tests and documentation
+📝 Documentation:
+- Protocol specification (protocol_v1.md)
+- Architecture guide (ARCHITECTURE.md)
+- Client design guide (CLIENT_DESIGN.md)
+- TUI implementation guide (TUI_IMPLEMENTATION.md)
+- Client README files
+
+⏳ Future Enhancements:
+- Web UI client (React-based)
+- Telegram bot client
+- Additional tools (web search, code execution)
+- Enhanced testing suite
 
 See `PROGRESS.md` for detailed status.
 
 ## Documentation
 
+### Getting Started
 - `QUICKSTART.md` - Quick start guide
 - `INSTALL.md` - Installation instructions
-- `PROGRESS.md` - Development progress
-- `TODO_v0.1.1.md` - Detailed implementation plan
+- `README.md` - This file (overview and features)
+
+### Architecture & Design
+- `docs/ARCHITECTURE.md` - "Dumb client" architecture and gateway design
+- `docs/CLIENT_DESIGN.md` - Client implementation guide
+- `docs/TUI_IMPLEMENTATION.md` - TUI client implementation details
 - `shared/protocol/protocol_v1.md` - WebSocket protocol specification
-- `apps/web/MIGRATION_NEEDED.md` - Web UI migration guide
+
+### Client Documentation
+- `clients/cli/README.md` - CLI/TUI client usage
+- `clients/cli/README_TUI.md` - TUI mode detailed documentation
+
+### Development
+- `PROGRESS.md` - Development progress and status
+- `TODO_v0.1.1.md` - Detailed implementation plan
 
 ## License
 
