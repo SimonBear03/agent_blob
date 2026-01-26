@@ -10,6 +10,41 @@ The TUI (`clients/cli/cli_tui.py`) is a full-featured terminal client with:
 - Session management
 - Multi-client support
 
+## ⚠️ Core Principle: "Dumb Client"
+
+**The TUI is a pure "dumb client"** - it follows the golden rule:
+
+> **Clients are just chatboxes. Send text, display text. That's it.**
+
+### What the TUI Does NOT Do:
+- ❌ Parse commands (no checking if message starts with `/`)
+- ❌ Make API calls (no session list endpoints)
+- ❌ Format command responses (no "building" session lists)
+- ❌ Manage sessions (no session state beyond current ID)
+- ❌ Implement command logic (no business logic)
+
+### What the TUI DOES Do:
+- ✅ Send user input to gateway (all text, including `/commands`)
+- ✅ Display messages from gateway (system, user, assistant)
+- ✅ Show streaming tokens in real-time
+- ✅ Update UI state from gateway events
+- ✅ Handle 2 local commands: `/quit` and Ctrl+C (UI-only)
+
+### Why This Matters:
+When you type `/sessions`, the TUI:
+1. Sends `"agent"` request with `message: "/sessions"` to gateway
+2. Waits for response
+3. Gateway recognizes command, queries DB, formats text
+4. Gateway sends `MESSAGE` event with formatted text
+5. TUI displays it - **no idea it was a command!**
+
+This means:
+- Building a Telegram client? Same pattern, < 200 lines
+- Adding `/sessions search`? Change gateway only, all clients get it
+- Changing session list format? Update gateway, done
+
+**If you're tempted to add command parsing to your client - STOP! That logic belongs in the gateway.**
+
 ## Architecture
 
 ```

@@ -247,7 +247,7 @@ class AgentBlobTUI:
             initial_session = await self.connection.connect(
                 client_type="tui",
                 session_preference=session_pref,
-                history_limit=20
+                history_limit=None  # Load ALL messages for scrollable TUI
             )
             
             # Setup event handlers
@@ -370,13 +370,16 @@ class AgentBlobTUI:
             })
             self.tui.render_full()
         elif role == "assistant":
-            # Assistant message (LLM responses)
-            self.tui.messages.append({
-                "role": "assistant",
-                "content": content,
-                "streaming": False
-            })
-            self.tui.render_full()
+            # Assistant messages are handled via streaming (STATUS → TOKEN → FINAL)
+            # Only show them here if we're NOT currently streaming
+            # (e.g., when loading history or for non-streamed responses)
+            if not self.streaming:
+                self.tui.messages.append({
+                    "role": "assistant",
+                    "content": content,
+                    "streaming": False
+                })
+                self.tui.render_full()
     
     async def _handle_token(self, payload: dict):
         """Handle token."""
@@ -390,13 +393,15 @@ class AgentBlobTUI:
         status = payload.get("status")
         run_id = payload.get("runId")
         
-        if run_id == self.current_run_id:
-            if status == "streaming":
-                self.tui.start_assistant_message()
-            elif status == "thinking":
-                self.tui.set_status("Thinking...", "yellow")
-            elif status == "executing_tool":
-                self.tui.set_status("Using tools...", "blue")
+        # Respond to status events from any client in this session
+        # (not just our own requests)
+        if status == "streaming":
+            self.streaming = True
+            self.tui.start_assistant_message()
+        elif status == "thinking":
+            self.tui.set_status("Thinking...", "yellow")
+        elif status == "executing_tool":
+            self.tui.set_status("Using tools...", "blue")
     
     async def _handle_error(self, payload: dict):
         """Handle error."""
@@ -406,7 +411,9 @@ class AgentBlobTUI:
         self.cancelling = False
     
     async def _handle_final(self, payload: dict):
-        """Handle final."""
+        """Handle final event from any client in this session."""
+        run_id = payload.get("runId")
+        
         if self.cancelling:
             self.tui.messages.append({
                 "role": "assistant",
@@ -433,8 +440,13 @@ class AgentBlobTUI:
                 
                 self.tui.update_stats(**stats_update)
         
+        # Always stop streaming when any request completes
+        # (gateway processes requests sequentially per session)
         self.streaming = False
-        self.current_run_id = None
+        
+        # Only clear current_run_id if this was OUR request
+        if run_id == self.current_run_id:
+            self.current_run_id = None
 
 
 def main():
