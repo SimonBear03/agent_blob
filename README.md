@@ -91,15 +91,17 @@ Your client just displays it - no command parsing, no API calls, no formatting l
 ## Key Features
 
 - **WebSocket Protocol**: Universal transport for all clients (Web, CLI, Telegram)
-- **Multi-Client Support**: Multiple clients can connect to the same session simultaneously
+- **Multi-Client Support**: Multiple clients can connect to the same session simultaneously with real-time broadcasting
+- **Three Client Options**: TUI (terminal), Telegram bot, and Web UI (coming soon)
 - **Real-Time Streaming**: Token-by-token streaming from GPT-4o with status updates
-- **Session Management**: Search, list, paginate, and switch between conversation sessions
-- **Gateway Commands**: Built-in commands (`/sessions`, `/new`, `/help`, etc.)
-- **Modern TUI Client**: Split-screen terminal interface with persistent history and status bar
+- **Session Management**: Search, list, paginate, and context-aware switching between conversations
+- **Gateway Commands**: Built-in commands (`/sessions`, `/new`, `/help`, etc.) work in all clients
+- **Modern TUI Client**: Split-screen terminal interface with scrollable full history
+- **Telegram Bot**: Chat with your AI from anywhere via Telegram
 - **Tool Execution**: Filesystem, memory, session search, and process management
 - **Process Tracking**: Monitor and cancel long-running operations
 - **Request Queueing**: Per-session FIFO queue with cancellation support
-- **Configurable History**: Per-client message history limits (4-20 messages)
+- **Smart History**: Full history for TUI, compact 4-message view for Telegram
 - **Local-First**: All data stored in SQLite, no cloud dependencies
 
 ## Quick Start
@@ -272,15 +274,20 @@ Telegram clients receive messages prefixed with source:
 Commands are messages starting with `/` that are processed by the gateway:
 
 ### Session Management
-- `/sessions` - List recent sessions (page 1, 9 per page)
-- `/sessions <n>` - Show page N of sessions
-- `/sessions` - List sessions, then type a number to switch
+- `/sessions` - List recent sessions (9 per page)
 - `/sessions 2` or `/sessions page 2` - Show page 2
 - `/sessions next` / `/sessions prev` - Navigate through pages
 - `/sessions search <keyword>` - Search sessions by title or content
 - `/new` - Create a new session
 
-**Tip:** After `/sessions`, just type a number to switch! (e.g., `/sessions` → `2`)
+**Context-Aware Switching:**
+After using `/sessions`, just type a number to switch to that session!
+```
+You: /sessions
+Bot: [Shows list: 1. Python project, 2. Bug fixing, ...]
+You: 2
+Bot: [Switches to session #2 with recent message context]
+```
 
 ### Information
 - `/help` - Show all available commands

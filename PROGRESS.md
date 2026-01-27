@@ -13,10 +13,11 @@ Last updated: 2026-01-27
 - ✅ **Request queue** - Per-session FIFO queue with cancellation support
 - ✅ **Method handlers** - Routing for all protocol methods
 - ✅ **Command processing** - Gateway commands with pagination and search
-  - `/help`, `/new`, `/sessions`, `/switch`, `/status`, `/history`
+  - `/help`, `/new`, `/sessions`, `/status`, `/history`
   - Session pagination with `/sessions next` and `/sessions prev`
   - Session search with `/sessions search <keyword>`
-  - Client-side state tracking (last page, last query)
+  - Context-aware session switching (type number after `/sessions`)
+  - Client-side state tracking (last page, last query, last command)
 
 ### Phase 2: Database & Runtime
 - ✅ **Database migration** - Sessions, messages, memory, agent_runs tables
@@ -31,7 +32,7 @@ Last updated: 2026-01-27
 
 ### Phase 4: Client Implementation
 - ✅ **TUI client** - Modern terminal interface with split-screen layout
-  - Persistent chat history display
+  - Full scrollable chat history (all messages)
   - Real-time streaming with cursor indicator (▊)
   - Status bar with connection state, model, tokens, message count
   - Color-coded context usage (green/yellow/red)
@@ -39,15 +40,26 @@ Last updated: 2026-01-27
   - Command history (Up/Down arrows)
   - Multi-client message indicators
   - Session statistics display
+- ✅ **Telegram bot** - Mobile-friendly Telegram client
+  - Secure single-user bot (user ID validation)
+  - Real-time streaming with edit-based updates
+  - Role prefixes (You:, Assistant:, System:)
+  - Message metadata (model, tokens, session)
+  - Compact history (4 recent messages on switch)
+  - Smart chunking for long messages (4096 char limit)
+  - Markdown formatting with plain text fallback
 - ✅ **Connection wrapper** - Clean WebSocket client with event callbacks
-- ✅ **History limiting** - Configurable per-client message history (4-20 messages)
+- ✅ **Smart history** - Per-client history limits (None for TUI, 4 for Telegram)
 
 ### Phase 5: Advanced Gateway Features
 - ✅ **Session switching** - Dynamic session switching with SESSION_CHANGED events
+- ✅ **Context-aware switching** - Type number after `/sessions` to switch
 - ✅ **Welcome messages** - Contextual welcome based on user state (new/returning)
 - ✅ **Stats tracking** - Model info, token usage, message counts
-- ✅ **Client info tracking** - History limits, pagination state per client
-- ✅ **Smart broadcasting** - Client-type-aware event formatting
+- ✅ **Client info tracking** - History limits, pagination state, last command per client
+- ✅ **Smart broadcasting** - Client-type-aware event formatting with cross-client indicators
+- ✅ **Message history** - Fixed ordering (latest messages, not oldest)
+- ✅ **Multi-client streaming** - All clients receive streaming tokens regardless of sender
 
 ### Phase 6: Documentation
 - ✅ **Architecture docs** - Updated ARCHITECTURE.md with current implementation
@@ -61,7 +73,6 @@ Last updated: 2026-01-27
 
 ### Additional Clients
 - ⏳ **Web UI** - React-based web client (structure exists, needs WebSocket migration)
-- ⏳ **Telegram bot** - Telegram client using same gateway connection pattern
 
 ### Testing
 - ⏳ **Protocol tests** - Validate request/response/event schemas
@@ -81,31 +92,37 @@ Last updated: 2026-01-27
 # 1. Start the gateway
 python scripts/run_gateway.py
 
-# 2. Start the TUI client
-python run_cli.py
+# 2. Start a client (TUI or Telegram)
+python run_cli.py          # TUI with full scrollable history
+python run_telegram.py     # Telegram bot (mobile-friendly)
 
-# 3. Try commands
+# 3. Try commands (work in all clients!)
 /sessions              # List your conversations
 /sessions search AI    # Search for sessions about AI
-/switch 2              # Switch to session #2
+2                      # After /sessions, just type a number to switch!
 /new                   # Create new session
 /status                # Show session stats
+
+# 4. Test multi-client!
+# Open both TUI and Telegram - messages sync in real-time
 ```
 
 ### Core Features
 - ✅ **WebSocket protocol v1** - Full spec with schemas
-- ✅ **Multi-client support** - Multiple clients per session with broadcasting
-- ✅ **Session management** - Create, list, search (FTS), paginate, switch
-- ✅ **Message persistence** - All messages stored in SQLite
-- ✅ **Real-time streaming** - Token-by-token responses from GPT-4o
+- ✅ **Multi-client support** - Multiple clients per session with real-time broadcasting
+- ✅ **Three clients** - TUI (terminal), Telegram bot, Web UI (coming soon)
+- ✅ **Session management** - Create, list, search (FTS), paginate, context-aware switching
+- ✅ **Message persistence** - All messages stored in SQLite with proper ordering
+- ✅ **Real-time streaming** - Token-by-token responses from GPT-4o to all clients
 - ✅ **Tool execution** - Filesystem, memory, session, process tools
 - ✅ **Process tracking** - Monitor and cancel long-running operations
 - ✅ **Request queueing** - Per-session FIFO queue with cancellation
-- ✅ **Gateway commands** - Rich command system with pagination and search
-- ✅ **Smart broadcasting** - Client-type-aware message formatting
-- ✅ **History limiting** - Configurable per-client (4-20 messages)
+- ✅ **Gateway commands** - Rich command system with context-aware input
+- ✅ **Smart broadcasting** - Client-type-aware message formatting with cross-client indicators
+- ✅ **Smart history** - Full for TUI (scrollable), compact for Telegram (4 messages)
 - ✅ **Stats tracking** - Model, tokens, message counts, context usage
-- ✅ **Modern TUI** - Split-screen terminal interface with status bar
+- ✅ **Modern TUI** - Split-screen terminal interface with full scrollable history
+- ✅ **Telegram bot** - Secure mobile client with role prefixes and metadata display
 
 ### Available Tools
 1. **Filesystem**: `filesystem.read`, `filesystem.write`, `filesystem.list`
