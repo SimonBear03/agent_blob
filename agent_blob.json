@@ -1,0 +1,9 @@
+{
+  "gateway": { "host": "127.0.0.1", "port": 3336 },
+  "data": { "dir": "./data" },
+  "permissions": {
+    "deny": [],
+    "ask": ["shell.run", "git.*", "web.*", "filesystem.write"],
+    "allow": ["filesystem.read", "filesystem.list", "tasks.*"]
+  }
+}
