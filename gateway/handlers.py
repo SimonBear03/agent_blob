@@ -225,28 +225,23 @@ async def handle_sessions_list(request: Request, websocket: WebSocket):
         await websocket.send_json(response)
         return
     
-    # Query database for sessions
-    from runtime.db.sessions import SessionsDB
-    sessions = SessionsDB.get_sessions_with_stats(limit=params.limit, offset=params.offset)
-    
-    # Format for response
-    formatted_sessions = []
-    for session in sessions:
-        formatted_sessions.append({
-            "id": session["id"],
-            "title": session["title"] or "Untitled conversation",
-            "lastMessage": session.get("last_message", "")[:100] if session.get("last_message") else "",
-            "lastActivity": session.get("last_activity") or session["updated_at"],
-            "messageCount": session.get("message_count", 0)
-        })
-    
+    from runtime import get_runtime
+    r = get_runtime()
+    sessions = await r.list_sessions(limit=params.limit, offset=params.offset)
+    formatted_sessions = [
+        {
+            "id": s["id"],
+            "title": s.get("title") or s["id"] or "Untitled",
+            "lastMessage": "",
+            "lastActivity": s.get("updated_at"),
+            "messageCount": 0
+        }
+        for s in sessions
+    ]
     response = create_response(
         request_id=request.id,
         ok=True,
-        payload={
-            "sessions": formatted_sessions,
-            "total": len(formatted_sessions)  # TODO: Get actual total count
-        }
+        payload={"sessions": formatted_sessions, "total": len(formatted_sessions)}
     )
     await websocket.send_json(response)
 
@@ -318,26 +313,18 @@ async def handle_sessions_history(request: Request, websocket: WebSocket):
         await websocket.send_json(response)
         return
     
-    # Load messages from database
-    from runtime.db.messages import MessagesDB
     session_id = params.sessionId
-    
     if not session_id:
         response = create_response(request.id, False, error="sessionId required")
         await websocket.send_json(response)
         return
-    
-    messages = MessagesDB.list_messages(session_id, limit=params.limit)
-    
-    # Format messages
-    formatted_messages = []
-    for msg in messages:
-        formatted_messages.append({
-            "id": msg["id"],
-            "role": msg["role"],
-            "content": msg["content"],
-            "timestamp": msg["created_at"]
-        })
+    from runtime import get_runtime
+    r = get_runtime()
+    messages = await r.load_messages(session_id, limit=params.limit, offset=0)
+    formatted_messages = [
+        {"id": m["id"], "role": m["role"], "content": m["content"], "timestamp": m.get("created_at", "")}
+        for m in messages
+    ]
     
     response = create_response(
         request_id=request.id,

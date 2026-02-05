@@ -1,7 +1,7 @@
 """
 Agent Blob Gateway - WebSocket-based universal gateway.
 
-This is the main entry point for all clients (Web UI, CLI, Telegram).
+This is the main entry point for all clients (Web UI, CLI).
 """
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -61,16 +61,8 @@ async def startup_event():
     """Initialize on startup."""
     logger.info("Agent Blob Gateway starting up...")
     logger.info(f"Gateway version: 0.1.1")
-    
-    # Initialize database
-    from runtime.db import init_db
-    db_path = os.getenv("DB_PATH", "./data/agent_blob.db")
-    init_db(db_path)
-    logger.info(f"Database initialized at {db_path}")
-    
-    # Initialize runtime
     from runtime import init_runtime
-    init_runtime()
+    await init_runtime()
     logger.info("Agent runtime initialized")
 
 
@@ -155,33 +147,27 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close()
             return
         
-        # Gateway decides which session to assign based on preference
-        from runtime.db.sessions import SessionsDB
-        from runtime.db.messages import MessagesDB
-        import uuid
-        
+        from runtime import get_runtime
+        r = get_runtime()
         is_new_user = False
         is_new_session = False
-        
+
         if session_preference == "new":
-            # Explicitly requested new session
-            session = SessionsDB.create_session(title="New conversation")
+            session = await r.create_session()
             session_id = session["id"]
             is_new_session = True
-            logger.info(f"Created new session: {session_id[:8]}...")
+            logger.info(f"Created new session: {session_id[:16]}...")
         else:
-            # "auto" or "continue" - try to use most recent
-            sessions = SessionsDB.list_sessions(limit=1, offset=0)
+            sessions = await r.list_sessions(limit=1, offset=0)
             if sessions:
                 session_id = sessions[0]["id"]
-                logger.info(f"Connected to most recent session: {session_id[:8]}...")
+                logger.info(f"Connected to most recent session: {session_id[:16]}...")
             else:
-                # No sessions exist, create the first one
-                session = SessionsDB.create_session(title="New conversation")
+                session = await r.create_session()
                 session_id = session["id"]
                 is_new_user = True
                 is_new_session = True
-                logger.info(f"Created first session: {session_id[:8]}...")
+                logger.info(f"Created first session: {session_id[:16]}...")
         
         # Add client to connection manager
         connection_manager.add_client(session_id, websocket, client_type, history_limit=history_limit)
@@ -206,33 +192,20 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info(f"Client connected: type={client_type}, session={session_id[:8]}...")
         
         # Send initial session_changed event with session info and message history
-        session = SessionsDB.get_session(session_id)
-        # Resolve history limit
+        session = await r.get_or_create_session(session_id)
         try:
             effective_history_limit = connection_manager.get_history_limit(websocket)
         except AttributeError:
-            effective_history_limit = None  # Load all by default
-        
-        # Load messages based on history limit:
-        # - None: Load all messages (default for scrollable clients like TUI)
-        # - 0: Load no messages (for clients that manage history themselves)
-        # - > 0: Load that many recent messages (for limited display like Telegram)
+            effective_history_limit = None
         if effective_history_limit == 0:
             messages = []
         elif effective_history_limit is None:
-            # Load all messages
-            messages = MessagesDB.list_messages(session_id, limit=10000, offset=0)
+            messages = await r.load_messages(session_id, limit=10000, offset=0)
         else:
-            messages = MessagesDB.list_messages(session_id, limit=effective_history_limit, offset=0)
-        
-        # Estimate token usage for context window (rough: 1 token ~= 4 chars)
-        total_chars = sum(len(msg.get("content", "")) for msg in messages)
+            messages = await r.load_messages(session_id, limit=effective_history_limit, offset=0)
+        total_chars = sum(len(str(msg.get("content", ""))) for msg in messages)
         estimated_tokens = total_chars // 4
-        
-        # Get model and context limit from runtime (single source of truth)
-        from runtime.runtime import get_runtime
-        runtime = get_runtime()
-        model_info = runtime.get_model_info()
+        model_info = r.get_model_info()
         model_name = model_info["model_name"]
         token_limit = model_info["context_limit"]
         
@@ -265,7 +238,6 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Send welcome message
         from datetime import datetime
-        session = SessionsDB.get_session(session_id)
         message_count = len(messages)
         
         if is_new_user:

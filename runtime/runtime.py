@@ -1,412 +1,442 @@
 """
-Agent runtime - processes agent requests and yields event stream.
+Agent runtime: memory-aware agent loop with JSONL storage, compaction, and tools.
 
-This is the core agent loop that's decoupled from transport (WebSocket/HTTP).
+Replaces the previous v1 runtime. Single entry point for gateway.
 """
 import os
-import json
+import asyncio
+import time
 from pathlib import Path
-from typing import AsyncIterator, Dict, Any, Optional
+from typing import AsyncIterator, Optional, Dict, Any, List
+from datetime import datetime
 from openai import AsyncOpenAI
-import logging
 
-from .db.messages import MessagesDB
-from .db.sessions import SessionsDB
-from .db.audit import AuditDB
-from .tools import get_registry
-from .processes import get_process_manager
+from .storage import SessionStore, StateCache, SessionState
+from .storage.models import create_message_event, MessageTurn
+from .memory import MemoryExtractor, MemoryStorage
+from .memory.search import MemorySearch
+from .memory.reranker import MemoryReranker
+from .compaction import SessionCompactor, ConversationSummarizer
+from .tools import ToolRegistry, init_memory_tools
 
-logger = logging.getLogger(__name__)
+
+def _to_gateway_event(e: dict, run_id: str) -> dict:
+    """Convert internal runtime event to gateway protocol shape."""
+    t = e.get("type")
+    if t == "status":
+        return {
+            "type": "event",
+            "event": "status",
+            "payload": {"runId": run_id, "status": e.get("status", "unknown")},
+        }
+    if t == "token":
+        return {
+            "type": "event",
+            "event": "token",
+            "payload": {"runId": run_id, "content": e.get("content", ""), "delta": True},
+        }
+    if t == "tool_result":
+        return {
+            "type": "event",
+            "event": "tool_result",
+            "payload": {
+                "runId": run_id,
+                "toolName": e.get("name", ""),
+                "result": {"content": e.get("result", "")},
+            },
+        }
+    if t == "final":
+        return {
+            "type": "event",
+            "event": "final",
+            "payload": {"runId": run_id, "messageId": "", "totalTokens": 0},
+        }
+    if t == "error":
+        return {
+            "type": "event",
+            "event": "error",
+            "payload": {
+                "runId": run_id,
+                "message": e.get("error", "Unknown error"),
+                "retryable": False,
+                "errorCode": None,
+            },
+        }
+    return {
+        "type": "event",
+        "event": "status",
+        "payload": {"runId": run_id, "status": str(t)},
+    }
 
 
 class AgentRuntime:
-    """Agent runtime with tool execution and LLM integration."""
-    
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        model_name: Optional[str] = None,
-        system_prompt_path: Optional[str] = None
-    ):
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.model_name = model_name or os.getenv("MODEL_NAME", "gpt-4o")
-        self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
-        
-        # Load system prompt
-        if system_prompt_path:
-            self.system_prompt = self._load_system_prompt(system_prompt_path)
-        else:
-            # __file__ is runtime/runtime.py, so .parent.parent gets us to project root
-            default_path = Path(__file__).parent.parent / "shared" / "prompts" / "system.md"
-            self.system_prompt = self._load_system_prompt(str(default_path))
-        
-        # Get tool registry
-        self.registry = get_registry()
-        self.process_manager = get_process_manager()
-    
-    def _load_system_prompt(self, path: str) -> str:
-        """Load system prompt from file."""
+    """
+    Agent runtime with memory, JSONL session storage, compaction, and tools.
+    """
+
+    def __init__(self):
+        self.openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.model = os.getenv("MODEL_NAME", "gpt-4o")
+
+        self.session_store = SessionStore()
+        self.state_cache = StateCache()
+
+        self.memory_storage = MemoryStorage(openai_client=self.openai_client)
+        self.memory_extractor = MemoryExtractor(openai_client=self.openai_client)
+        self.memory_search = MemorySearch(
+            storage=self.memory_storage,
+            openai_client=self.openai_client,
+        )
+        self.memory_reranker = MemoryReranker(openai_client=self.openai_client)
+
+        self.summarizer = ConversationSummarizer(openai_client=self.openai_client)
+        self.compactor = SessionCompactor(
+            session_store=self.session_store,
+            state_cache=self.state_cache,
+            summarizer=self.summarizer,
+            memory_extractor=self.memory_extractor,
+            memory_storage=self.memory_storage,
+        )
+
+        self.tool_registry = ToolRegistry()
+        self._initialize_tools()
+
+        self.system_prompt = self._load_system_prompt()
+
+    async def initialize(self):
+        """Async initialization (e.g. memory storage)."""
+        await self.memory_storage.initialize()
+
+    def _initialize_tools(self):
+        from .tools import filesystem, session_tools, process_tools, memory_tools
+
+        filesystem.register_tools(self.tool_registry)
+        session_tools.register_tools(self.tool_registry)
+        process_tools.register_tools(self.tool_registry)
+        init_memory_tools(
+            self.memory_storage,
+            self.memory_search,
+            self.memory_reranker,
+        )
+        memory_tools.register_tools(self.tool_registry)
+
+    def _load_system_prompt(self) -> str:
+        root = Path(__file__).resolve().parent.parent
+        path = root / "shared" / "prompts" / "system.md"
         try:
-            with open(path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except Exception as e:
-            logger.warning(f"Could not load system prompt from {path}: {e}")
-            return "You are a helpful AI assistant with access to tools and persistent memory."
-    
+            return path.read_text(encoding="utf-8")
+        except Exception:
+            return "You are a helpful AI assistant with memory and tools."
+
     def get_model_info(self) -> dict:
-        """
-        Get information about the current model configuration.
-        
-        Returns:
-            dict with keys: model_name, context_limit
-        """
-        from shared.model_config import get_model_context_limit
-        return {
-            "model_name": self.model_name,
-            "context_limit": get_model_context_limit(self.model_name)
-        }
-    
+        try:
+            from shared.model_config import get_model_context_limit
+            limit = get_model_context_limit(self.model)
+        except Exception:
+            limit = 128000
+        return {"model_name": self.model, "context_limit": limit}
+
     async def process(self, request) -> AsyncIterator[Dict[str, Any]]:
         """
-        Process an agent request and yield event stream.
-        
-        Args:
-            request: QueuedRequest with session_id, message, run_id
-        
-        Yields:
-            Event dicts: {type: "event", event: "...", payload: {...}}
+        Process an agent request (gateway contract).
+        request has session_id, message, run_id.
+        Yields gateway-shaped events: {"type":"event","event":"...","payload":{...}}.
         """
         session_id = request.session_id
         message = request.message
-        run_id = request.run_id
-        
-        if not self.client:
-            yield {
-                "type": "event",
-                "event": "error",
-                "payload": {
-                    "runId": run_id,
-                    "message": "OpenAI API key not configured",
-                    "retryable": False,
-                    "errorCode": "NO_API_KEY"
-                }
-            }
-            return
-        
+        run_id = getattr(request, "run_id", None) or getattr(request, "request_id", "run-0")
+
+        async for e in self._process_impl(session_id, message, run_id):
+            yield _to_gateway_event(e, run_id)
+
+    async def _process_impl(
+        self,
+        session_id: str,
+        user_message: str,
+        user_message_id: str,
+    ) -> AsyncIterator[dict]:
+        user_event = create_message_event(
+            message_id=user_message_id,
+            role="user",
+            content=user_message,
+        )
+        await self.session_store.append_event(session_id, user_event)
+
+        state = await self.state_cache.get_or_create_state(session_id)
+
+        if await self.compactor.should_compact(state, self.model):
+            yield {"type": "status", "status": "compacting", "message": "Compacting conversation history..."}
+            state = await self.compactor.compact(session_id, state)
+            yield {"type": "status", "status": "ready", "message": "Compaction complete"}
+
+        yield {"type": "status", "status": "retrieving_memory", "message": "Searching long-term memory..."}
+        relevant_memories = await self.memory_search.search(query=user_message, top_k=5)
+
+        messages = self._build_messages_with_memory(
+            state=state,
+            user_message=user_message,
+            memories=relevant_memories,
+        )
+        total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+        state.token_count = total_chars // 4
+
+        yield {"type": "status", "status": "thinking", "message": "Thinking..."}
+        accumulated_response = ""
+        tool_calls_dict = {}
+
         try:
-            # Save user message
-            MessagesDB.create_message(session_id, "user", message)
-            
-            # Update session timestamp (for activity sorting)
-            SessionsDB.update_session(session_id)
-            
-            # Yield status: thinking
-            yield {
-                "type": "event",
-                "event": "status",
-                "payload": {
-                    "runId": run_id,
-                    "status": "thinking"
-                }
-            }
-            
-            # Build conversation history
-            messages = self._build_messages(session_id)
-            
-            # Get available tools
-            tools = self.registry.to_openai_functions() if self.registry else []
-            
-            # Agent loop
-            iteration = 0
-            max_iterations = 10
-            collected_content = ""
-            
-            while iteration < max_iterations:
-                iteration += 1
-                
-                # Call OpenAI with streaming (include usage data)
-                response_stream = await self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=messages,
-                    tools=tools if tools else None,
-                    stream=True,
-                    stream_options={"include_usage": True}
-                )
-                
-                # Yield status: streaming
-                yield {
-                    "type": "event",
-                    "event": "status",
-                    "payload": {
-                        "runId": run_id,
-                        "status": "streaming"
-                    }
-                }
-                
-                # Stream tokens
-                tool_calls_accumulator = {}
-                usage_data = None
-                async for chunk in response_stream:
-                    # Capture usage data from final chunk
-                    if hasattr(chunk, 'usage') and chunk.usage:
-                        usage_data = chunk.usage
-                    
-                    # Skip chunks without choices (like the final usage-only chunk)
-                    if not chunk.choices or len(chunk.choices) == 0:
-                        continue
-                    
-                    delta = chunk.choices[0].delta
-                    
-                    # Stream content tokens
-                    if delta.content:
-                        collected_content += delta.content
-                        yield {
-                            "type": "event",
-                            "event": "token",
-                            "payload": {
-                                "runId": run_id,
-                                "content": delta.content,
-                                "delta": True
+            stream = await self.openai_client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=self.tool_registry.to_openai_tools(),
+                stream=True,
+                temperature=0.7,
+            )
+            yield {"type": "status", "status": "streaming", "message": "Streaming response..."}
+
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    accumulated_response += delta.content
+                    yield {"type": "token", "content": delta.content}
+                if delta.tool_calls:
+                    for tc_chunk in delta.tool_calls:
+                        idx = tc_chunk.index
+                        if idx not in tool_calls_dict:
+                            tool_calls_dict[idx] = {
+                                "id": None,
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
                             }
-                        }
-                    
-                    # Accumulate tool calls
-                    if delta.tool_calls:
-                        for tc_delta in delta.tool_calls:
-                            idx = tc_delta.index
-                            if idx not in tool_calls_accumulator:
-                                tool_calls_accumulator[idx] = {
-                                    "id": tc_delta.id or "",
-                                    "type": "function",
-                                    "function": {
-                                        "name": tc_delta.function.name or "",
-                                        "arguments": tc_delta.function.arguments or ""
-                                    }
-                                }
-                            else:
-                                if tc_delta.function.name:
-                                    tool_calls_accumulator[idx]["function"]["name"] += tc_delta.function.name
-                                if tc_delta.function.arguments:
-                                    tool_calls_accumulator[idx]["function"]["arguments"] += tc_delta.function.arguments
-                
-                # Check if there are tool calls
-                if not tool_calls_accumulator:
-                    # No tool calls - we're done
-                    break
-                
-                # Process tool calls
-                tool_calls = list(tool_calls_accumulator.values())
-                
-                # Save assistant message with tool calls
-                tool_calls_json = json.dumps(tool_calls)
-                MessagesDB.create_message(
-                    session_id,
-                    "assistant",
-                    collected_content or "",
-                    tool_calls=tool_calls_json
-                )
-                
-                # Add to messages history
-                messages.append({
-                    "role": "assistant",
-                    "content": collected_content or "",
-                    "tool_calls": tool_calls
-                })
-                
-                # Execute tool calls
-                for tool_call in tool_calls:
+                        if tc_chunk.id:
+                            tool_calls_dict[idx]["id"] = tc_chunk.id
+                        if tc_chunk.function:
+                            if tc_chunk.function.name:
+                                tool_calls_dict[idx]["function"]["name"] += tc_chunk.function.name
+                            if tc_chunk.function.arguments:
+                                tool_calls_dict[idx]["function"]["arguments"] += tc_chunk.function.arguments or ""
+
+            tool_calls_list = [tool_calls_dict[i] for i in sorted(tool_calls_dict.keys())]
+
+            if tool_calls_list:
+                yield {
+                    "type": "status",
+                    "status": "executing_tools",
+                    "message": f"Executing {len(tool_calls_list)} tools...",
+                }
+                tool_results = []
+                for tool_call in tool_calls_list:
                     tool_name = tool_call["function"]["name"]
-                    tool_args_str = tool_call["function"]["arguments"]
-                    
-                    # Yield tool_call event
-                    yield {
-                        "type": "event",
-                        "event": "tool_call",
-                        "payload": {
-                            "runId": run_id,
-                            "toolName": tool_name,
-                            "arguments": json.loads(tool_args_str) if tool_args_str else {}
-                        }
-                    }
-                    
-                    # Yield status: executing_tool
-                    yield {
-                        "type": "event",
-                        "event": "status",
-                        "payload": {
-                            "runId": run_id,
-                            "status": "executing_tool"
-                        }
-                    }
-                    
-                    # Execute tool
+                    tool_args = tool_call["function"]["arguments"]
+                    tool_call_id = tool_call["id"]
                     try:
-                        # Parse arguments
-                        tool_args = json.loads(tool_args_str) if tool_args_str else {}
-                        
-                        # Create process for tracking
-                        process_id = self.process_manager.create_process(run_id, tool_name)
-                        
-                        # Execute the tool
-                        result = await self.registry.execute_tool(tool_name, tool_args)
-                        
-                        # Mark process as complete
-                        self.process_manager.complete_process(process_id, result)
-                        
-                        result_str = json.dumps(result)
-                        error_str = None
-                    except Exception as e:
-                        logger.error(f"Tool execution error ({tool_name}): {e}")
-                        
-                        # Mark process as failed
-                        if 'process_id' in locals():
-                            self.process_manager.fail_process(process_id, str(e))
-                        
-                        result = {"success": False, "error": str(e)}
-                        result_str = json.dumps(result)
-                        error_str = str(e)
-                    
-                    # Log to audit
-                    AuditDB.log_tool_execution(
-                        tool_name=tool_name,
-                        parameters=tool_args_str,
-                        result=result_str,
-                        error=error_str,
-                        session_id=session_id
-                    )
-                    
-                    # Save tool response message
-                    MessagesDB.create_message(
-                        session_id,
-                        "tool",
-                        result_str,
-                        tool_call_id=tool_call["id"],
-                        name=tool_name
-                    )
-                    
-                    # Yield tool_result event
-                    yield {
-                        "type": "event",
-                        "event": "tool_result",
-                        "payload": {
-                            "runId": run_id,
-                            "toolName": tool_name,
-                            "result": result
-                        }
-                    }
-                    
-                    # Add tool response to messages
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "name": tool_name,
-                        "content": result_str
-                    })
-                
-                # Reset for next iteration
-                collected_content = ""
-            
-            # Save final assistant message if we have content
-            if collected_content:
-                saved_msg = MessagesDB.create_message(
-                    session_id,
-                    "assistant",
-                    collected_content
+                        import json
+                        args_dict = json.loads(tool_args) if tool_args else {}
+                        result = await self.tool_registry.execute_tool(tool_name, args_dict)
+                        tool_results.append({
+                            "tool_call_id": tool_call_id,
+                            "role": "tool",
+                            "name": tool_name,
+                            "content": str(result),
+                        })
+                        yield {"type": "tool_result", "name": tool_name, "result": str(result)}
+                    except Exception as ex:
+                        err = str(ex)
+                        tool_results.append({
+                            "tool_call_id": tool_call_id,
+                            "role": "tool",
+                            "name": tool_name,
+                            "content": err,
+                        })
+                        yield {"type": "tool_result", "name": tool_name, "result": err, "error": True}
+
+                messages_with_tools = (
+                    messages
+                    + [{"role": "assistant", "content": accumulated_response or None, "tool_calls": tool_calls_list}]
+                    + tool_results
                 )
-            else:
-                saved_msg = {"id": "unknown"}
-            
-            # Update session timestamp
-            SessionsDB.update_session(session_id)
-            
-            # Get actual token usage from OpenAI (if available)
-            if usage_data:
-                prompt_tokens = usage_data.prompt_tokens
-                completion_tokens = usage_data.completion_tokens
-                total_tokens = usage_data.total_tokens
-            else:
-                # Fallback to estimation if usage not available
-                prompt_tokens = sum(len(msg.get("content", "")) for msg in history) // 4
-                completion_tokens = len(collected_content) // 4
-                total_tokens = prompt_tokens + completion_tokens
-            
-            # Yield final event with token usage
-            yield {
-                "type": "event",
-                "event": "final",
-                "payload": {
-                    "runId": run_id,
-                    "messageId": saved_msg["id"],
-                    "usage": {
-                        "promptTokens": prompt_tokens,
-                        "completionTokens": completion_tokens,
-                        "totalTokens": total_tokens
-                    },
-                    "model": self.model_name  # Include actual model used
-                }
-            }
-        
+                yield {"type": "status", "status": "thinking", "message": "Processing tool results..."}
+                stream = await self.openai_client.chat.completions.create(
+                    model=self.model,
+                    messages=messages_with_tools,
+                    tools=self.tool_registry.to_openai_tools(),
+                    stream=True,
+                    temperature=0.7,
+                )
+                yield {"type": "status", "status": "streaming", "message": "Streaming response..."}
+                accumulated_response = ""
+                async for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        accumulated_response += chunk.choices[0].delta.content
+                        yield {"type": "token", "content": chunk.choices[0].delta.content}
+
         except Exception as e:
-            logger.error(f"Error processing request {run_id}: {e}")
-            yield {
-                "type": "event",
-                "event": "error",
-                "payload": {
-                    "runId": run_id,
-                    "message": f"Agent processing failed: {str(e)}",
-                    "retryable": False,
-                    "errorCode": "AGENT_ERROR"
-                }
-            }
-    
-    def _build_messages(self, session_id: str) -> list:
-        """Build message history for OpenAI API."""
-        messages = [
-            {"role": "system", "content": self.system_prompt}
-        ]
-        
-        # Get session messages
-        db_messages = MessagesDB.list_messages(session_id)
-        
-        for msg in db_messages:
-            if msg["role"] == "user":
-                messages.append({
-                    "role": "user",
-                    "content": msg["content"]
-                })
-            elif msg["role"] == "assistant":
-                msg_dict = {
-                    "role": "assistant",
-                    "content": msg["content"]
-                }
-                if msg["tool_calls"]:
-                    msg_dict["tool_calls"] = json.loads(msg["tool_calls"])
-                messages.append(msg_dict)
-            elif msg["role"] == "tool":
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": msg["tool_call_id"],
-                    "name": msg["name"],
-                    "content": msg["content"]
-                })
-        
+            yield {"type": "error", "error": str(e)}
+            return
+
+        assistant_message_id = f"msg_{int(datetime.utcnow().timestamp() * 1000)}"
+        assistant_event = create_message_event(
+            message_id=assistant_message_id,
+            role="assistant",
+            content=accumulated_response,
+        )
+        await self.session_store.append_event(session_id, assistant_event)
+
+        asyncio.create_task(
+            self._extract_memories_async(
+                session_id=session_id,
+                user_message=user_message,
+                assistant_message=accumulated_response,
+                user_message_id=user_message_id,
+                assistant_message_id=assistant_message_id,
+            )
+        )
+
+        turn = MessageTurn(
+            user_message=user_message,
+            assistant_message=accumulated_response,
+            timestamp=datetime.utcnow().isoformat() + "Z",
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
+        )
+        state.recent_turns.append(turn)
+        state.message_count += 2
+        await self.state_cache.save_state(state)
+
+        yield {"type": "final", "message": "Response complete"}
+
+    def _build_messages_with_memory(
+        self,
+        state: SessionState,
+        user_message: str,
+        memories: list,
+    ) -> list:
+        messages = [{"role": "system", "content": self.system_prompt}]
+        if state.rolling_summary.user_profile or state.rolling_summary.active_topics:
+            messages.append({
+                "role": "system",
+                "content": f"## Conversation Summary\n{state.rolling_summary.to_text()}",
+            })
+        if memories:
+            mem_text = "## Relevant Long-Term Memories\n\n"
+            for mem in memories:
+                mem_text += f"- [{mem.type.value}] {mem.content}\n"
+                if getattr(mem, "context", None):
+                    mem_text += f"  Context: {mem.context}\n"
+            messages.append({"role": "system", "content": mem_text})
+        for turn in state.recent_turns[-20:]:
+            messages.append({"role": "user", "content": turn.user_message})
+            messages.append({"role": "assistant", "content": turn.assistant_message})
+        messages.append({"role": "user", "content": user_message})
         return messages
 
+    async def _extract_memories_async(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_message: str,
+        user_message_id: str,
+        assistant_message_id: str,
+    ):
+        try:
+            if not await self.memory_extractor.should_extract(user_message, assistant_message):
+                return
+            result = await self.memory_extractor.extract_from_turn(
+                user_msg=user_message,
+                assistant_msg=assistant_message,
+                session_id=session_id,
+                user_message_id=user_message_id,
+                assistant_message_id=assistant_message_id,
+            )
+            for memory in result.memories:
+                await self.memory_storage.save_memory(memory)
+        except Exception:
+            pass
 
-# Global runtime instance
+    # ---- Session/message APIs for gateway (use SessionStore + StateCache) ----
+
+    async def list_sessions(self, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
+        """List session ids with title and updated_at, sorted by updated_at descending."""
+        ids = await self.session_store.list_sessions()
+        out = []
+        for sid in ids:
+            meta = await self.session_store.get_session_metadata(sid)
+            state = await self.state_cache.load_state(sid)
+            updated = (state.updated_at if state else None) or (meta.get("modified") if meta else None) or ""
+            out.append({
+                "id": sid,
+                "title": sid,
+                "updated_at": updated,
+                "created_at": (meta.get("created_at") if meta else None) or updated,
+            })
+        out.sort(key=lambda x: x["updated_at"] or "", reverse=True)
+        return out[offset : offset + limit]
+
+    async def count_sessions(self) -> int:
+        ids = await self.session_store.list_sessions()
+        return len(ids)
+
+    async def get_or_create_session(self, session_id: str) -> Dict[str, Any]:
+        """Ensure session exists; return {id, title, created_at, updated_at}."""
+        state = await self.state_cache.get_or_create_state(session_id)
+        return {
+            "id": session_id,
+            "title": session_id,
+            "created_at": state.created_at,
+            "updated_at": state.updated_at,
+        }
+
+    async def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        state = await self.state_cache.load_state(session_id)
+        if not state:
+            return None
+        return {
+            "id": session_id,
+            "title": session_id,
+            "created_at": state.created_at,
+            "updated_at": state.updated_at,
+        }
+
+    async def load_messages(self, session_id: str, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
+        """Return messages as {id, role, content, created_at} from recent turns."""
+        state = await self.state_cache.get_or_create_state(session_id)
+        turns = state.recent_turns[-(limit + offset) :]
+        turns = turns[offset:][:limit]
+        out = []
+        for t in turns:
+            out.append({
+                "id": t.user_message_id,
+                "role": "user",
+                "content": t.user_message,
+                "created_at": t.timestamp,
+            })
+            out.append({
+                "id": t.assistant_message_id,
+                "role": "assistant",
+                "content": t.assistant_message,
+                "created_at": t.timestamp,
+            })
+        return out
+
+    async def create_session(self) -> Dict[str, Any]:
+        """Create a new session; returns {id, title, created_at, updated_at}."""
+        session_id = f"session-{int(time.time() * 1000)}"
+        return await self.get_or_create_session(session_id)
+
+
 _runtime: Optional[AgentRuntime] = None
 
 
-def get_runtime() -> AgentRuntime:
-    """Get the global runtime instance."""
+async def init_runtime() -> AgentRuntime:
     global _runtime
-    if _runtime is None:
-        _runtime = AgentRuntime()
+    _runtime = AgentRuntime()
+    await _runtime.initialize()
     return _runtime
 
 
-def init_runtime(api_key: Optional[str] = None, model_name: Optional[str] = None) -> AgentRuntime:
-    """Initialize the runtime with specific configuration."""
-    global _runtime
-    _runtime = AgentRuntime(api_key=api_key, model_name=model_name)
+def get_runtime() -> AgentRuntime:
+    if _runtime is None:
+        raise RuntimeError("Runtime not initialized. Call await init_runtime() first.")
     return _runtime

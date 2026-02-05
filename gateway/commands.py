@@ -81,17 +81,11 @@ async def handle_new_command(
     connection_manager: ConnectionManager
 ):
     """Create a new session and switch to it."""
-    from runtime.db.sessions import SessionsDB
-    import uuid
-    
-    # Create new session in database
-    new_session = SessionsDB.create_session(title="New conversation")
+    from runtime import get_runtime
+    r = get_runtime()
+    new_session = await r.create_session()
     new_session_id = new_session["id"]
-    
-    # Switch this client to the new session
     connection_manager.switch_client_session(websocket, new_session_id)
-    
-    # Send session_changed event
     await send_session_changed_event(
         new_session_id,
         websocket,
@@ -107,17 +101,16 @@ async def handle_sessions_command(
     connection_manager: ConnectionManager
 ):
     """List recent sessions with pagination and search."""
-    from runtime.db.sessions import SessionsDB
+    from runtime import get_runtime
     from datetime import datetime
     from math import ceil
-    
+
+    r = get_runtime()
     per_page = 9
     page = 1
     query = None
-    
-    # Restore last state if using next/prev
     last_page, last_query = connection_manager.get_sessions_state(websocket)
-    
+
     if args:
         head = args[0].lower()
         if head == "next":
@@ -133,7 +126,6 @@ async def handle_sessions_command(
                 message = "Usage: `/sessions search <keyword>`"
                 await send_command_response(session_id, message, connection_manager)
                 return
-            # Allow optional trailing page number
             if args[-1].isdigit() and len(args) > 2:
                 page = max(1, int(args[-1]))
                 query = " ".join(args[1:-1])
@@ -145,23 +137,32 @@ async def handle_sessions_command(
             message = "Usage: `/sessions` | `/sessions 2` (page 2) | `/sessions page 2` | `/sessions next` | `/sessions prev` | `/sessions search <keyword>`"
             await send_command_response(session_id, message, connection_manager)
             return
-    
+
     offset = (page - 1) * per_page
-    
+
     if query:
-        total = SessionsDB.count_sessions_search(query)
-        sessions = SessionsDB.search_sessions(query, limit=per_page, offset=offset)
+        all_sessions = await r.list_sessions(limit=500, offset=0)
+        q = query.lower()
+        sessions = [s for s in all_sessions if q in (s.get("id") or "").lower() or q in (s.get("title") or "").lower()]
+        total = len(sessions)
+        sessions = sessions[offset : offset + per_page]
         header = f"📋 **Sessions matching:** `{query}`"
     else:
-        total = SessionsDB.count_sessions()
-        sessions = SessionsDB.list_sessions(limit=per_page, offset=offset)
+        total = await r.count_sessions()
+        sessions = await r.list_sessions(limit=per_page, offset=offset)
         header = "📋 **Recent Sessions:**"
-    
+
     total_pages = max(1, ceil(total / per_page)) if total > 0 else 1
     if page > total_pages:
         page = total_pages
         offset = (page - 1) * per_page
-        sessions = SessionsDB.search_sessions(query, limit=per_page, offset=offset) if query else SessionsDB.list_sessions(limit=per_page, offset=offset)
+        if query:
+            all_sessions = await r.list_sessions(limit=500, offset=0)
+            q = query.lower()
+            sessions = [s for s in all_sessions if q in (s.get("id") or "").lower() or q in (s.get("title") or "").lower()]
+            sessions = sessions[offset : offset + per_page]
+        else:
+            sessions = await r.list_sessions(limit=per_page, offset=offset)
     
     if not sessions:
         if query:
@@ -172,24 +173,13 @@ async def handle_sessions_command(
         return
     
     lines = [header, f"\nPage {page}/{total_pages} • {total} total\n"]
-    
-    # Get message counts for all sessions in one query (more efficient)
-    from runtime.db import get_db
-    conn = get_db().get_connection()
-    cursor = conn.cursor()
-    
+
     for idx, sess in enumerate(sessions, 1 + offset):
         sess_id = sess["id"]
-        
-        cursor.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (sess_id,))
-        msg_count = cursor.fetchone()[0]
-        
-        # Format time
         try:
-            updated = datetime.fromisoformat(sess["updated_at"].replace("Z", "+00:00"))
+            updated = datetime.fromisoformat((sess.get("updated_at") or "").replace("Z", "+00:00"))
             now = datetime.utcnow()
             delta = now - updated.replace(tzinfo=None)
-            
             if delta.total_seconds() < 60:
                 time_str = "just now"
             elif delta.total_seconds() < 3600:
@@ -202,12 +192,9 @@ async def handle_sessions_command(
                 time_str = f"{delta.days}d ago"
         except Exception:
             time_str = "unknown"
-        
-        title = sess["title"] or "Untitled"
+        title = sess.get("title") or sess_id or "Untitled"
         current_marker = " ← current" if sess_id == session_id else ""
-        lines.append(f"{idx}. **{title}** • {msg_count} messages • {time_str}{current_marker}")
-    
-    conn.close()
+        lines.append(f"{idx}. **{title}** • {time_str}{current_marker}")
     
     lines.append("\nType a number to switch (e.g., just `2` for session #2)")
     lines.append("Use `/sessions next` or `/sessions prev` to navigate pages.")
@@ -229,45 +216,36 @@ async def handle_session_switch_command(
     connection_manager: ConnectionManager
 ):
     """Switch to a different session."""
-    from runtime.db.sessions import SessionsDB
-    
+    from runtime import get_runtime
+    r = get_runtime()
+
     if not args:
-        message = "Usage: `/switch <number>` or `/switch <uuid>`"
+        message = "Usage: `/switch <number>` or type a number after `/sessions`"
         await send_command_response(session_id, message, connection_manager)
         return
-    
+
     target = args[0]
-    
-    # Determine if it's a number (index) or UUID
     if target.isdigit():
-        # Switch by index
-        idx = int(target) - 1  # Convert to 0-based
+        idx = int(target) - 1
         if idx < 0:
             message = f"❌ Invalid session number: {target}\n\nUse `/sessions` to see available sessions."
             await send_command_response(session_id, message, connection_manager)
             return
-        
-        sessions = SessionsDB.list_sessions(limit=1, offset=idx)
+        sessions = await r.list_sessions(limit=1, offset=idx)
         if not sessions:
             message = f"❌ Invalid session number: {target}\n\nUse `/sessions` to see available sessions."
             await send_command_response(session_id, message, connection_manager)
             return
-        
-        target_session = sessions[0]
-        target_session_id = target_session["id"]
+        target_session_id = sessions[0]["id"]
     else:
-        # Switch by UUID
-        target_session = SessionsDB.get_session(target)
+        target_session = await r.get_session(target)
         if not target_session:
             message = f"❌ Session not found: {target}"
             await send_command_response(session_id, message, connection_manager)
             return
         target_session_id = target_session["id"]
-    
-    # Switch this client to the target session
+
     connection_manager.switch_client_session(websocket, target_session_id)
-    
-    # Send session_changed event (without custom message to show full context)
     await send_session_changed_event(
         target_session_id,
         websocket,
@@ -294,18 +272,25 @@ Use `/history 50` for more messages."""
 
 async def handle_status_command(session_id: str, connection_manager: ConnectionManager):
     """Show session status."""
-    # TODO: Get actual session stats from database
-    
+    from runtime import get_runtime
+    r = get_runtime()
+    model_info = r.get_model_info()
+    session = await r.get_session(session_id)
+    msg_count = session.get("message_count") if session else 0
+    if session is None:
+        session = await r.get_or_create_session(session_id)
+    state = getattr(r, "state_cache", None)
+    if state:
+        s = await state.load_state(session_id)
+        msg_count = s.message_count if s else 0
     message = f"""📊 **Session Status:**
 
-**Session ID:** `{session_id[:8]}...`
-**Messages:** 42
-**Model:** gpt-4o
-**Queue:** Empty
-**Active processes:** None
+**Session ID:** `{session_id[:20]}...` (truncated)
+**Messages:** {msg_count}
+**Model:** {model_info.get("model_name", "gpt-4o")}
+**Context limit:** {model_info.get("context_limit", "?")}
 
 Use `/sessions` to see all conversations."""
-    
     await send_command_response(session_id, message, connection_manager)
 
 
@@ -340,50 +325,25 @@ async def send_session_changed_event(
     connection_manager: ConnectionManager,
     message: Optional[str] = None
 ):
-    """
-    Send session_changed event to a specific websocket.
-    
-    This tells the client that their view has switched to a different session.
-    Includes the new session info and recent message history.
-    """
-    from runtime.db.sessions import SessionsDB
-    from runtime.db.messages import MessagesDB
-    
-    # Get session info
-    session = SessionsDB.get_session(new_session_id)
-    if not session:
-        logger.error(f"Cannot send session_changed: session {new_session_id} not found")
-        return
-    
-    # Get recent messages based on client history limit
+    """Send session_changed event to a specific websocket."""
+    from runtime import get_runtime
+    r = get_runtime()
+    session = await r.get_or_create_session(new_session_id)
     try:
         history_limit = connection_manager.get_history_limit(websocket)
     except AttributeError:
-        history_limit = None  # Load all by default
-    
-    # Load messages based on history limit:
-    # - None: Load all messages (default for scrollable clients like TUI)
-    # - 0: Load no messages
-    # - > 0: Load that many recent messages (for limited display like Telegram)
+        history_limit = None
     if history_limit == 0:
         messages = []
     elif history_limit is None:
-        messages = MessagesDB.list_messages(new_session_id, limit=10000, offset=0)
+        messages = await r.load_messages(new_session_id, limit=10000, offset=0)
     else:
-        messages = MessagesDB.list_messages(new_session_id, limit=history_limit, offset=0)
-    
-    # Estimate token usage for context window (rough: 1 token ~= 4 chars)
-    total_chars = sum(len(msg.get("content", "")) for msg in messages)
+        messages = await r.load_messages(new_session_id, limit=history_limit, offset=0)
+    total_chars = sum(len(str(m.get("content", ""))) for m in messages)
     estimated_tokens = total_chars // 4
-    
-    # Get model and context limit from runtime (single source of truth)
-    from runtime.runtime import get_runtime
-    runtime = get_runtime()
-    model_info = runtime.get_model_info()
+    model_info = r.get_model_info()
     model_name = model_info["model_name"]
     token_limit = model_info["context_limit"]
-    
-    # Build event
     event = create_event(
         event_type=EventType.SESSION_CHANGED,
         payload={
@@ -392,13 +352,8 @@ async def send_session_changed_event(
             "createdAt": session.get("created_at"),
             "updatedAt": session.get("updated_at"),
             "messages": [
-                {
-                    "id": msg["id"],
-                    "role": msg["role"],
-                    "content": msg["content"],
-                    "timestamp": msg["created_at"]
-                }
-                for msg in messages
+                {"id": m["id"], "role": m["role"], "content": m["content"], "timestamp": m.get("created_at", "")}
+                for m in messages
             ],
             "stats": {
                 "messageCount": len(messages),
@@ -406,7 +361,7 @@ async def send_session_changed_event(
                 "tokensUsed": estimated_tokens,
                 "tokensLimit": token_limit
             },
-            "message": message  # Optional status message
+            "message": message
         }
     )
     

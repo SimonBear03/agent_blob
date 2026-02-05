@@ -22,7 +22,7 @@ The first frame MUST be a `connect` request:
   "method": "connect",
   "params": {
     "version": "1",
-    "clientType": "web" | "cli" | "telegram"
+    "clientType": "web" | "cli"
   }
 }
 ```
@@ -332,7 +332,7 @@ Broadcast to all clients when any client sends a message:
 
 **Client-specific formatting:**
 - Web/CLI: `fromSelf` flag (true if this client sent it)
-- Telegram: Content prefixed with source (e.g., "🖥️ [From Web UI] Hello")
+- Clients receive `fromSelf` flag on user messages to indicate sender.
 
 ### queued - Request queued
 
@@ -452,7 +452,7 @@ Broadcast to all clients when any client sends a message:
 
 1. **User messages** - Broadcast to all clients in session
    - Sender receives: `fromSelf: true`
-   - Others receive: `fromSelf: false` (Web/CLI) or prefixed content (Telegram)
+   - Others receive: `fromSelf: false`
 
 2. **Agent events** - Broadcast identically to all clients
    - Tokens, tool calls, status, final - no client-specific formatting

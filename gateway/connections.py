@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class ClientInfo:
     """Information about a connected client."""
     websocket: WebSocket
-    client_type: str  # "web", "cli", "telegram"
+    client_type: str  # "web", "cli"
     session_id: str
     history_limit: Optional[int] = None
     sessions_page: int = 1
@@ -33,14 +33,11 @@ class ConnectionManager:
         # Track client type icons for formatting
         self.client_icons = {
             "web": "🖥️",
-            "cli": "📱",
-            "telegram": "💬"
+            "cli": "📱"
         }
         self.default_history_limits = {
-            "tui": 20,
             "cli": 20,
-            "web": 20,
-            "telegram": 4
+            "web": 20
         }
     
     def add_client(
@@ -177,9 +174,7 @@ class ConnectionManager:
         """
         Broadcast event to all clients in a session.
         
-        Formats messages appropriately based on client type:
-        - Telegram: Prefixes user messages from other clients
-        - Web/CLI: Uses fromSelf flag
+        Formats messages appropriately (fromSelf flag for user messages).
         
         Args:
             session_id: Session to broadcast to
@@ -225,37 +220,14 @@ class ConnectionManager:
         sender_type: Optional[str]
     ) -> dict:
         """
-        Format event based on client type.
-        
-        For user messages:
-        - Telegram: Prefix with source if from another client
-        - Web/CLI: Add fromSelf flag
-        
-        For other events: No formatting needed
+        Format event for client. For user messages, add fromSelf flag.
         """
-        # Clone the event
         client_event = event.copy()
-        
-        # Only format user message events
         if (event.get("event") == "message" and 
             event.get("payload", {}).get("role") == "user"):
-            
             is_sender = (client_info.websocket == sender_ws)
-            
-            if client_info.client_type == "telegram":
-                # Telegram gets prefixed message if not sender
-                if not is_sender and sender_type:
-                    icon = self.client_icons.get(sender_type, "📨")
-                    source_name = sender_type.title()
-                    
-                    original_content = event["payload"]["content"]
-                    client_event["payload"] = event["payload"].copy()
-                    client_event["payload"]["content"] = f"{icon} [From {source_name}] {original_content}"
-            else:
-                # Web/CLI get fromSelf flag
-                client_event["payload"] = event["payload"].copy()
-                client_event["payload"]["fromSelf"] = is_sender
-        
+            client_event["payload"] = event["payload"].copy()
+            client_event["payload"]["fromSelf"] = is_sender
         return client_event
     
     def get_stats(self) -> dict:

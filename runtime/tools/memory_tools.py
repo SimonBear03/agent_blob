@@ -1,116 +1,99 @@
 """
 Memory management tools for pinned memory operations.
+Uses an in-memory store (no runtime.db dependency).
 """
 from typing import Optional
 from . import ToolDefinition, ToolRegistry
-from ..db.memory import MemoryDB
+
+# In-memory store for pinned memories: key -> {"value", "description"}
+_pinned: dict[str, dict] = {}
+
+
+def _get_memory(key: str) -> dict | None:
+    raw = _pinned.get(key)
+    if raw is None:
+        return None
+    return {"key": key, "value": raw["value"], "description": raw.get("description")}
+
+
+def _set_memory(key: str, value: str, description: Optional[str] = None) -> dict:
+    _pinned[key] = {"value": value, "description": description}
+    return _get_memory(key)
+
+
+def _delete_memory(key: str) -> None:
+    _pinned.pop(key, None)
 
 
 async def get_memory(key: str) -> dict:
     """
     Get a pinned memory entry by key.
-    
+
     Args:
         key: The memory key to retrieve
-    
+
     Returns:
         Dict with 'success', 'memory'/'error'
     """
     try:
-        memory = MemoryDB.get_memory(key)
+        memory = _get_memory(key)
         if memory:
-            return {
-                "success": True,
-                "memory": memory
-            }
-        else:
-            return {
-                "success": False,
-                "error": f"Memory with key '{key}' not found"
-            }
+            return {"success": True, "memory": memory}
+        return {"success": False, "error": f"Memory with key '{key}' not found"}
     except Exception as e:
-        return {
-            "success": False,
-            "error": f"Error retrieving memory: {str(e)}"
-        }
+        return {"success": False, "error": f"Error retrieving memory: {e!s}"}
 
 
 async def set_memory(key: str, value: str, description: Optional[str] = None) -> dict:
     """
     Set or update a pinned memory entry.
-    
+
     Args:
         key: The memory key
         value: The memory value
         description: Optional description of what this memory represents
-    
+
     Returns:
         Dict with 'success', 'memory'/'error'
     """
     try:
-        memory = MemoryDB.create_or_update_memory(key, value, description)
-        return {
-            "success": True,
-            "memory": memory,
-            "message": "Memory updated successfully"
-        }
+        memory = _set_memory(key, value, description)
+        return {"success": True, "memory": memory, "message": "Memory updated successfully"}
     except Exception as e:
-        return {
-            "success": False,
-            "error": f"Error setting memory: {str(e)}"
-        }
+        return {"success": False, "error": f"Error setting memory: {e!s}"}
 
 
 async def list_memories() -> dict:
     """
     List all pinned memory entries.
-    
+
     Returns:
         Dict with 'success', 'memories'/'error'
     """
     try:
-        memories = MemoryDB.list_memories()
-        return {
-            "success": True,
-            "memories": memories,
-            "count": len(memories)
-        }
+        memories = [_get_memory(k) for k in _pinned]
+        return {"success": True, "memories": memories, "count": len(memories)}
     except Exception as e:
-        return {
-            "success": False,
-            "error": f"Error listing memories: {str(e)}"
-        }
+        return {"success": False, "error": f"Error listing memories: {e!s}"}
 
 
 async def delete_memory(key: str) -> dict:
     """
     Delete a pinned memory entry.
-    
+
     Args:
         key: The memory key to delete
-    
+
     Returns:
         Dict with 'success', 'message'/'error'
     """
     try:
-        # Check if exists first
-        existing = MemoryDB.get_memory(key)
-        if not existing:
-            return {
-                "success": False,
-                "error": f"Memory with key '{key}' not found"
-            }
-        
-        MemoryDB.delete_memory(key)
-        return {
-            "success": True,
-            "message": f"Memory with key '{key}' deleted successfully"
-        }
+        if _get_memory(key) is None:
+            return {"success": False, "error": f"Memory with key '{key}' not found"}
+        _delete_memory(key)
+        return {"success": True, "message": f"Memory with key '{key}' deleted successfully"}
     except Exception as e:
-        return {
-            "success": False,
-            "error": f"Error deleting memory: {str(e)}"
-        }
+        return {"success": False, "error": f"Error deleting memory: {e!s}"}
 
 
 def register_tools(registry: ToolRegistry):

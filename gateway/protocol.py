@@ -71,7 +71,7 @@ class Event(BaseModel):
 class ConnectParams(BaseModel):
     """Parameters for connect method."""
     version: str
-    clientType: str  # "web", "cli", "telegram"
+    clientType: str  # "web", "cli"
     sessionPreference: Optional[str] = None
     historyLimit: Optional[int] = None
 
