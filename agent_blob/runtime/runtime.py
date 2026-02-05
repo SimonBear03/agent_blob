@@ -415,6 +415,21 @@ class Runtime:
 
                 yield create_event(EventType.RUN_TOOL_CALL, {"runId": run_id, "toolName": tool_name, "arguments": args})
 
+                # Lightweight schema validation: if required args are missing, don't ask permission or execute.
+                required = []
+                try:
+                    required = list((tool_def.parameters or {}).get("required") or [])
+                except Exception:
+                    required = []
+                missing = [k for k in required if k not in args]
+                if missing:
+                    res = {"ok": False, "error": f"Missing required arguments: {missing}", "missing": missing}
+                    yield create_event(EventType.RUN_TOOL_RESULT, {"runId": run_id, "toolName": tool_name, **res})
+                    tool_results_msgs.append(
+                        {"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(res, ensure_ascii=False)}
+                    )
+                    continue
+
                 await self._enforce(
                     tool_ctx,
                     tool_def.capability,

@@ -7,6 +7,7 @@ from agent_blob.runtime.storage.memory_store import MemoryStore
 from agent_blob.runtime.tools.filesystem import filesystem_read, filesystem_list
 from agent_blob.runtime.tools.memory import build_memory_tools
 from agent_blob.runtime.tools.shell import shell_run
+from agent_blob.runtime.tools.web import web_fetch
 from agent_blob.runtime.tools.registry import ToolDefinition
 
 
@@ -25,6 +26,13 @@ class LocalProvider:
 
         async def _shell_run(args: Dict[str, Any]) -> Any:
             return await shell_run(str(args.get("command", "")))
+
+        async def _web_fetch(args: Dict[str, Any]) -> Any:
+            return await web_fetch(
+                str(args.get("url", "")),
+                max_bytes=int(args.get("max_bytes", 1_000_000) or 1_000_000),
+                timeout_s=float(args.get("timeout_s", 15.0) or 15.0),
+            )
 
         memory_search, memory_list_recent, memory_delete = build_memory_tools(self.memory)
 
@@ -61,6 +69,21 @@ class LocalProvider:
                     "required": ["command"],
                 },
                 executor=_shell_run,
+            ),
+            ToolDefinition(
+                name="web_fetch",
+                capability="web.fetch",
+                description="Fetch a URL (GET) and return text content (requires permission).",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "http(s) URL"},
+                        "max_bytes": {"type": "integer", "description": "Max bytes to read", "default": 1000000},
+                        "timeout_s": {"type": "number", "description": "Request timeout seconds", "default": 15},
+                    },
+                    "required": ["url"],
+                },
+                executor=_web_fetch,
             ),
             ToolDefinition(
                 name="memory_search",
@@ -101,4 +124,3 @@ class LocalProvider:
 
     def system_instructions(self) -> str | None:
         return None
-

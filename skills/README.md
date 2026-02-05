@@ -15,3 +15,8 @@ Configure skill directories + enabled skills in `agent_blob.json`:
 - `skills.enabled`
 - `skills.max_chars`
 
+Bundled starter skills:
+- `general` (built-in example)
+- `summarize`
+- `skill-creator`
+- `obsidian`

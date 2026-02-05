@@ -23,6 +23,7 @@ class MCPClientManager:
 
     def __init__(self):
         self._servers = self._load_servers()
+        self._tools_cache: Dict[str, List[Dict[str, Any]]] = {}
 
     def _load_servers(self) -> List[MCPServerConfig]:
         cfg = load_config()
@@ -70,6 +71,12 @@ class MCPClientManager:
                     )
             finally:
                 await client.close()
+        # Cache per-server
+        by_server: Dict[str, List[Dict[str, Any]]] = {}
+        for t in out:
+            by_server.setdefault(str(t.get("server")), []).append(t)
+        for k, v in by_server.items():
+            self._tools_cache[k] = v
         return out
 
     async def call_tool(self, *, server: str, name: str, arguments: Dict[str, Any]) -> Any:
@@ -81,8 +88,44 @@ class MCPClientManager:
             raise RuntimeError(f"Unknown MCP server: {server}")
         if s.transport != "streamable-http":
             raise RuntimeError(f"Unsupported MCP transport: {s.transport}")
+
+        # Resolve tool name: prefer exact; else allow unique suffix matches like "add" -> "demo.add".
+        resolved = await self._resolve_tool_name(server=server, name=name)
+
         client = MCPStreamableHttpClient(base_url=s.url)
         try:
-            return await client.tools_call(name=name, arguments=arguments)
+            return await client.tools_call(name=resolved, arguments=arguments)
         finally:
             await client.close()
+
+    async def _resolve_tool_name(self, *, server: str, name: str) -> str:
+        raw = str(name or "").strip()
+        if not raw:
+            raise RuntimeError("Missing MCP tool name")
+
+        tools = self._tools_cache.get(server)
+        if tools is None:
+            # Populate cache for this server only.
+            all_tools = await self.list_tools()
+            tools = [t for t in all_tools if t.get("server") == server]
+            self._tools_cache[server] = tools
+
+        names = [str(t.get("name", "")) for t in (tools or []) if isinstance(t, dict)]
+        if raw in names:
+            return raw
+
+        # If no dot, try prefixing with server name (common for demo.*).
+        if "." not in raw:
+            pref = f"{server}.{raw}"
+            if pref in names:
+                return pref
+
+        # Unique suffix match (e.g. "add" -> "* .add")
+        suffix = f".{raw}" if not raw.startswith(".") else raw
+        matches = [n for n in names if n.endswith(suffix)]
+        if len(matches) == 1:
+            return matches[0]
+
+        if matches:
+            raise RuntimeError(f"Ambiguous MCP tool name '{raw}'. Matches: {matches[:5]}")
+        raise RuntimeError(f"Unknown MCP tool name '{raw}'. Known tools: {names[:10]}")

@@ -30,7 +30,6 @@ Notes:
 Default endpoints:
 - WebSocket: `ws://127.0.0.1:3336/ws`
 - Health: `http://127.0.0.1:3336/health`
-
 ## Repo layout
 
 ```
@@ -56,6 +55,7 @@ agent_blob.json   # policy + data dir config
 - **MCP**: `agent_blob/runtime/mcp/` is a scaffold for future MCP server integration (quant module, econ DB, etc.). No MCP networking is wired yet.
 - **Skills**: local `SKILL.md` files in `skills/` (and any other dirs configured in `agent_blob.json`) are injected as enabled skills and can be listed/read via `skills_list`/`skills_get`.
 - **MCP**: `agent_blob/runtime/mcp/` implements MCP Streamable HTTP. Configure servers in `agent_blob.json` under `mcp.servers`, then use `mcp_list_tools` + `mcp_call` (or `mcp_refresh`).
+- **Web fetch**: `web_fetch` can fetch URLs for summarization/research (permission-gated).
 
 ## Data folder
 
@@ -112,3 +112,16 @@ The agent can manage structured memories without using the shell:
 - `memory_search` (capability `memory.search`) — find items + ids
 - `memory_list_recent` (capability `memory.list`) — show recent items
 - `memory_delete` (capability `memory.delete`) — delete by id (defaults to `ask`)
+
+## Skills
+
+Skills live under `skills/` as folders containing `SKILL.md`. Configure:
+- `skills.dirs` (search paths)
+- `skills.enabled` (injected into the system prompt)
+- `skills.max_chars` (cap total injected skill text)
+
+Use tools:
+- `skills_list`
+- `skills_get`
+
+Bundled starter skills: `summarize`, `skill-creator`, `obsidian`.
