@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict
 from uuid import uuid4
@@ -65,7 +66,17 @@ class Gateway:
         while True:
             try:
                 tasks = await self.runtime.tasks.list_tasks()
-                active = [t for t in tasks if t.get("status") not in ("done", "cancelled", "failed")]
+                now = time.time()
+                window_s = config.tasks_attach_window_s()
+                always_active = {"running", "waiting_permission", "waiting_user"}
+                active = []
+                for t in tasks:
+                    status = str(t.get("status") or "")
+                    if status in ("done", "cancelled", "failed"):
+                        continue
+                    updated = float(t.get("updated_at", 0) or 0)
+                    if status in always_active or (now - updated) <= window_s:
+                        active.append(t)
                 active_count = len(active)
                 should_emit = debug_ticks or (last_active_count is None) or (active_count != last_active_count)
                 if should_emit:
@@ -78,14 +89,16 @@ class Gateway:
                     last_maintenance_s = now
                     stats = await self.runtime.maintenance()
                     removed = ((stats.get("tasks") or {}).get("removed")) if isinstance(stats, dict) else 0
+                    closed = ((stats.get("tasks_autoclosed") or {}).get("closed")) if isinstance(stats, dict) else 0
                     mem_added = stats.get("memory_added") if isinstance(stats, dict) else 0
-                    if debug_ticks or removed or mem_added:
+                    emb = stats.get("embeddings_updated") if isinstance(stats, dict) else 0
+                    if debug_ticks or removed or closed or mem_added or emb:
                         await self._broadcast_event(
                             create_event(
                                 EventType.RUN_LOG,
                                 {
                                     "runId": "supervisor",
-                                    "message": f"maintenance: tasks_removed={removed} memory_added={mem_added}",
+                                    "message": f"maintenance: tasks_autoclosed={closed} tasks_removed={removed} memory_added={mem_added} embeddings_updated={emb}",
                                 },
                             )
                         )

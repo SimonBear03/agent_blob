@@ -74,3 +74,19 @@ class OpenAIChatCompletionsProvider:
             return json.loads(content)
         except Exception:
             return {}
+
+    async def embed(self, *, model: str, texts: List[str]) -> List[List[float]]:
+        """
+        Embeddings for vector memory search.
+        Returns a list of float vectors (one per input text).
+        """
+        texts = [str(t or "") for t in (texts or [])]
+        if not texts:
+            return []
+        resp = await self._client.embeddings.create(model=model, input=texts)
+        out: List[List[float]] = []
+        for item in getattr(resp, "data", []) or []:
+            vec = getattr(item, "embedding", None)
+            if isinstance(vec, list):
+                out.append([float(x) for x in vec])
+        return out
