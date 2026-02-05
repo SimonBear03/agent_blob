@@ -5,7 +5,7 @@ Always-on gateway + runtime (“master AI”) with:
 - Durable tasks + supervisor heartbeat
 - Long-term memory (pinned + searchable, upgradeable)
 - LLM tool-calling (filesystem/shell) with interactive confirmations
-- MCP capabilities (planned)
+- MCP capabilities (Streamable HTTP)
 - Interactive confirmations (Claude Code–style allow/ask/deny policy)
 
 ## Quick start
@@ -54,6 +54,8 @@ agent_blob.json   # policy + data dir config
 - **Memory** writes: `data/pinned.json` (always loaded), `data/memories.jsonl` (structured candidates/audit), `data/agent_blob.sqlite` (consolidated memory state + BM25 + embeddings).
 - **events.jsonl** is the canonical log; recent turns + episodic recall are derived from it (not from a separate “session” store).
 - **MCP**: `agent_blob/runtime/mcp/` is a scaffold for future MCP server integration (quant module, econ DB, etc.). No MCP networking is wired yet.
+- **Skills**: local `SKILL.md` files in `skills/` (and any other dirs configured in `agent_blob.json`) are injected as enabled skills and can be listed/read via `skills_list`/`skills_get`.
+- **MCP**: `agent_blob/runtime/mcp/` implements MCP Streamable HTTP. Configure servers in `agent_blob.json` under `mcp.servers`, then use `mcp_list_tools` + `mcp_call` (or `mcp_refresh`).
 
 ## Data folder
 

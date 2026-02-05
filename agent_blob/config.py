@@ -180,3 +180,33 @@ def log_keep_max_files(kind: str, default: int) -> int:
         return int(_log_cfg(kind).get("keep_max_files", default) or default)
     except Exception:
         return int(default)
+
+
+def skills_dirs() -> list[str]:
+    cfg = load_config()
+    v = _get(cfg, "skills", "dirs", default=["./skills", "./agent_blob/runtime/skills/examples"])
+    if isinstance(v, list):
+        return [str(x) for x in v]
+    return ["./skills", "./agent_blob/runtime/skills/examples"]
+
+
+def skills_enabled() -> list[str]:
+    cfg = load_config()
+    v = _get(cfg, "skills", "enabled", default=["general"])
+    if isinstance(v, list):
+        return [str(x) for x in v]
+    return ["general"]
+
+
+def skills_max_chars() -> int:
+    cfg = load_config()
+    try:
+        return int(_get(cfg, "skills", "max_chars", default=12000))
+    except Exception:
+        return 12000
+
+
+def mcp_servers() -> list[dict]:
+    cfg = load_config()
+    v = _get(cfg, "mcp", "servers", default=[])
+    return list(v or []) if isinstance(v, list) else []

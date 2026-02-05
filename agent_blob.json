@@ -20,6 +20,14 @@
       "device_id": "cli"
     }
   },
+  "skills": {
+    "dirs": ["./skills", "./agent_blob/runtime/skills/examples"],
+    "enabled": ["general"],
+    "max_chars": 12000
+  },
+  "mcp": {
+    "servers": []
+  },
   "tools": {
     "allowed_fs_root": null
   },
@@ -35,7 +43,7 @@
   },
   "permissions": {
     "deny": [],
-    "ask": ["shell.run", "git.*", "web.*", "filesystem.write", "memory.delete"],
-    "allow": ["filesystem.read", "filesystem.list", "tasks.*", "memory.search", "memory.list"]
+    "ask": ["shell.run", "git.*", "web.*", "filesystem.write", "memory.delete", "mcp.call"],
+    "allow": ["filesystem.read", "filesystem.list", "tasks.*", "memory.search", "memory.list", "skills.*", "mcp.list", "mcp.refresh"]
   }
 }

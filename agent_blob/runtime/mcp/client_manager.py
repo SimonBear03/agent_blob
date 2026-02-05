@@ -10,7 +10,7 @@ from agent_blob.config import load_config
 class MCPServerConfig:
     name: str
     url: str
-    transport: str = "ws"  # placeholder: ws/http/stdin
+    transport: str = "streamable-http"  # streamable-http|ws|stdio (we implement streamable-http)
 
 
 class MCPClientManager:
@@ -45,9 +45,44 @@ class MCPClientManager:
 
     async def list_tools(self) -> List[Dict[str, Any]]:
         """
-        Placeholder for future: discover MCP tools from configured servers.
+        Discover MCP tools from configured servers.
 
-        Returns a list of tool definitions that can be injected into the ToolRegistry.
+        Returns a list of dict tool descriptions:
+          {server, name, description, inputSchema}
         """
-        return []
+        from agent_blob.runtime.mcp.http_client import MCPStreamableHttpClient
 
+        out: List[Dict[str, Any]] = []
+        for s in self._servers:
+            if s.transport != "streamable-http":
+                continue
+            client = MCPStreamableHttpClient(base_url=s.url)
+            try:
+                tools = await client.tools_list()
+                for t in tools:
+                    out.append(
+                        {
+                            "server": s.name,
+                            "name": t.name,
+                            "description": t.description,
+                            "inputSchema": t.input_schema,
+                        }
+                    )
+            finally:
+                await client.close()
+        return out
+
+    async def call_tool(self, *, server: str, name: str, arguments: Dict[str, Any]) -> Any:
+        from agent_blob.runtime.mcp.http_client import MCPStreamableHttpClient
+
+        cfg = {s.name: s for s in self._servers}
+        s = cfg.get(server)
+        if not s:
+            raise RuntimeError(f"Unknown MCP server: {server}")
+        if s.transport != "streamable-http":
+            raise RuntimeError(f"Unsupported MCP transport: {s.transport}")
+        client = MCPStreamableHttpClient(base_url=s.url)
+        try:
+            return await client.tools_call(name=name, arguments=arguments)
+        finally:
+            await client.close()

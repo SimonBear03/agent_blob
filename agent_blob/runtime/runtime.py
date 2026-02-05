@@ -13,12 +13,11 @@ from agent_blob.runtime.storage.event_log import EventLog
 from agent_blob.runtime.storage.memory_store import MemoryStore
 from agent_blob.runtime.storage.tasks import TaskStore
 from agent_blob.runtime.storage.scheduler import SchedulerStore
-from agent_blob.runtime.tools.filesystem import filesystem_read, filesystem_list
-from agent_blob.runtime.tools.shell import shell_run
-from agent_blob.runtime.tools.memory import build_memory_tools
 from agent_blob.runtime.llm import OpenAIChatCompletionsProvider
 from agent_blob.runtime.tools.registry import ToolDefinition, ToolRegistry
 from agent_blob.runtime.memory import MemoryExtractor
+from agent_blob.runtime.capabilities.registry import CapabilityRegistry
+from agent_blob.runtime.providers import LocalProvider, SkillsProvider, MCPProvider
 from agent_blob.config import (
     load_config,
     llm_model_name,
@@ -45,7 +44,14 @@ class Runtime:
         self.tasks = TaskStore()
         self.schedules = SchedulerStore()
         self._llm = None
-        self.tools = ToolRegistry(self._default_tools())
+        self.capabilities = CapabilityRegistry(
+            providers=[
+                LocalProvider(memory=self.memory),
+                SkillsProvider(),
+                MCPProvider(),
+            ]
+        )
+        self.tools = ToolRegistry(self.capabilities.tools())
         self.memory_extractor = MemoryExtractor()
 
     async def startup(self):
@@ -265,6 +271,9 @@ class Runtime:
             "For memory management, use memory_search/memory_list_recent to find items and memory_delete to remove them.\n"
             "Only use tools when necessary to complete a user-requested task."
         )
+        cap_instructions = self.capabilities.system_instructions()
+        if cap_instructions:
+            system = system + "\n\n" + cap_instructions.strip()
         msgs: list[dict] = [{"role": "system", "content": system}]
         if pinned:
             msgs.append({"role": "system", "content": f"Pinned memory (authoritative): {pinned}"})
@@ -325,89 +334,6 @@ class Runtime:
             stats["error"] = str(e)
             await self.event_log.append({"type": "memory.extract_error", "runId": run_id, "error": str(e)})
         return stats
-
-    def _default_tools(self) -> List[ToolDefinition]:
-        async def _fs_read(args: Dict[str, Any]) -> Any:
-            return await filesystem_read(str(args.get("path", "")))
-
-        async def _fs_list(args: Dict[str, Any]) -> Any:
-            return await filesystem_list(str(args.get("path", "")))
-
-        async def _shell_run(args: Dict[str, Any]) -> Any:
-            return await shell_run(str(args.get("command", "")))
-
-        memory_search, memory_list_recent, memory_delete = build_memory_tools(self.memory)
-
-        return [
-            ToolDefinition(
-                name="filesystem_read",
-                capability="filesystem.read",
-                description="Read a text file within the allowed root.",
-                parameters={
-                    "type": "object",
-                    "properties": {"path": {"type": "string", "description": "Path to file"}},
-                    "required": ["path"],
-                },
-                executor=_fs_read,
-            ),
-            ToolDefinition(
-                name="filesystem_list",
-                capability="filesystem.list",
-                description="List a directory within the allowed root.",
-                parameters={
-                    "type": "object",
-                    "properties": {"path": {"type": "string", "description": "Path to directory"}},
-                    "required": ["path"],
-                },
-                executor=_fs_list,
-            ),
-            ToolDefinition(
-                name="shell_run",
-                capability="shell.run",
-                description="Run a shell command (requires permission).",
-                parameters={
-                    "type": "object",
-                    "properties": {"command": {"type": "string", "description": "Shell command to run"}},
-                    "required": ["command"],
-                },
-                executor=_shell_run,
-            ),
-            ToolDefinition(
-                name="memory_search",
-                capability="memory.search",
-                description="Search structured long-term memory items (returns ids you can use to delete).",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query"},
-                        "limit": {"type": "integer", "description": "Max results", "default": 5},
-                    },
-                    "required": ["query"],
-                },
-                executor=memory_search,
-            ),
-            ToolDefinition(
-                name="memory_list_recent",
-                capability="memory.list",
-                description="List recent structured long-term memory items.",
-                parameters={
-                    "type": "object",
-                    "properties": {"limit": {"type": "integer", "description": "Max results", "default": 20}},
-                },
-                executor=memory_list_recent,
-            ),
-            ToolDefinition(
-                name="memory_delete",
-                capability="memory.delete",
-                description="Delete one structured long-term memory item by id (requires permission).",
-                parameters={
-                    "type": "object",
-                    "properties": {"id": {"type": "string", "description": "Memory id from memory_search/list"}},
-                    "required": ["id"],
-                },
-                executor=memory_delete,
-            ),
-        ]
 
     async def _stream_agent_loop_with_tools(
         self,
