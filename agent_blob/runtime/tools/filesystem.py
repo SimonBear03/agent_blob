@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from agent_blob import config
 
 def _allowed_root() -> Path:
-    root = os.getenv("ALLOWED_FS_ROOT") or os.getcwd()
+    root = config.allowed_fs_root() or os.getcwd()
     return Path(root).resolve()
 
 
@@ -22,7 +23,7 @@ async def filesystem_read(path: str) -> dict:
     try:
         p.relative_to(root)
     except ValueError:
-        return {"ok": False, "error": f"Access denied (outside ALLOWED_FS_ROOT): {p}", "path": str(p)}
+        return {"ok": False, "error": f"Access denied (outside tools.allowed_fs_root): {p}", "path": str(p)}
     try:
         return {"ok": True, "path": str(p), "content": p.read_text(encoding="utf-8")}
     except Exception as e:
@@ -35,7 +36,7 @@ async def filesystem_list(path: str) -> dict:
     try:
         p.relative_to(root)
     except ValueError:
-        return {"ok": False, "error": f"Access denied (outside ALLOWED_FS_ROOT): {p}", "path": str(p)}
+        return {"ok": False, "error": f"Access denied (outside tools.allowed_fs_root): {p}", "path": str(p)}
     try:
         if not p.exists():
             return {"ok": False, "error": "Not found", "path": str(p)}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 
@@ -38,3 +39,54 @@ class OpenAIChatCompletionsProvider:
             if content:
                 yield content
 
+    async def stream_chat_chunks(
+        self,
+        *,
+        model: str,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Any]:
+        """
+        Yield raw OpenAI chunks (used for tool-calling accumulation).
+        """
+        stream = await self._client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=tools,
+            stream=True,
+            temperature=0.7,
+        )
+        async for chunk in stream:
+            yield chunk
+
+    async def chat_json(self, *, model: str, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Non-streaming JSON response (used for memory extraction / consolidation).
+        """
+        resp = await self._client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        content = resp.choices[0].message.content or "{}"
+        try:
+            return json.loads(content)
+        except Exception:
+            return {}
+
+    async def embed(self, *, model: str, texts: List[str]) -> List[List[float]]:
+        """
+        Embeddings for vector memory search.
+        Returns a list of float vectors (one per input text).
+        """
+        texts = [str(t or "") for t in (texts or [])]
+        if not texts:
+            return []
+        resp = await self._client.embeddings.create(model=model, input=texts)
+        out: List[List[float]] = []
+        for item in getattr(resp, "data", []) or []:
+            vec = getattr(item, "embedding", None)
+            if isinstance(vec, list):
+                out.append([float(x) for x in vec])
+        return out

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict
 from uuid import uuid4
@@ -12,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from agent_blob.protocol import EventType, create_event, create_response
 from agent_blob.policy.policy import Policy
 from agent_blob.runtime.runtime import Runtime
+from agent_blob import config
 
 load_dotenv()
 
@@ -56,19 +58,50 @@ class Gateway:
                 self.clients.pop(ws, None)
 
     async def _supervisor_loop(self):
-        interval_s = float(os.getenv("SUPERVISOR_INTERVAL_S", "15"))
-        debug_ticks = os.getenv("SUPERVISOR_DEBUG", "0") in ("1", "true", "yes", "on")
+        interval_s = config.supervisor_interval_s()
+        debug_ticks = config.supervisor_debug()
         last_active_count: int | None = None
+        last_maintenance_s: float = 0.0
+        maintenance_interval_s = config.maintenance_interval_s()
         while True:
             try:
                 tasks = await self.runtime.tasks.list_tasks()
-                active = [t for t in tasks if t.get("status") not in ("done", "cancelled", "failed")]
+                now = time.time()
+                window_s = config.tasks_attach_window_s()
+                always_active = {"running", "waiting_permission", "waiting_user"}
+                active = []
+                for t in tasks:
+                    status = str(t.get("status") or "")
+                    if status in ("done", "cancelled", "failed"):
+                        continue
+                    updated = float(t.get("updated_at", 0) or 0)
+                    if status in always_active or (now - updated) <= window_s:
+                        active.append(t)
                 active_count = len(active)
                 should_emit = debug_ticks or (last_active_count is None) or (active_count != last_active_count)
                 if should_emit:
                     msg = f"supervisor: active_tasks={active_count}"
                     await self._broadcast_event(create_event(EventType.RUN_LOG, {"runId": "supervisor", "message": msg}))
                 last_active_count = active_count
+
+                now = asyncio.get_running_loop().time()
+                if now - last_maintenance_s >= maintenance_interval_s:
+                    last_maintenance_s = now
+                    stats = await self.runtime.maintenance()
+                    removed = ((stats.get("tasks") or {}).get("removed")) if isinstance(stats, dict) else 0
+                    closed = ((stats.get("tasks_autoclosed") or {}).get("closed")) if isinstance(stats, dict) else 0
+                    mem_added = stats.get("memory_added") if isinstance(stats, dict) else 0
+                    emb = stats.get("embeddings_updated") if isinstance(stats, dict) else 0
+                    if debug_ticks or removed or closed or mem_added or emb:
+                        await self._broadcast_event(
+                            create_event(
+                                EventType.RUN_LOG,
+                                {
+                                    "runId": "supervisor",
+                                    "message": f"maintenance: tasks_autoclosed={closed} tasks_removed={removed} memory_added={mem_added} embeddings_updated={emb}",
+                                },
+                            )
+                        )
             except Exception as e:
                 await self._broadcast_event(create_event(EventType.RUN_LOG, {"runId": "supervisor", "message": f"supervisor error: {e}"}))
             await asyncio.sleep(interval_s)

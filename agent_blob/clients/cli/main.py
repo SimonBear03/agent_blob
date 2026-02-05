@@ -12,6 +12,7 @@ import websockets
 from dotenv import load_dotenv
 
 from agent_blob.clients.common.printer import Printer
+from agent_blob import config
 
 
 def _new_id(prefix: str) -> str:
@@ -38,11 +39,11 @@ async def _stdin_lines(queue: asyncio.Queue[str]):
 async def main() -> None:
     load_dotenv()
 
-    host = os.getenv("GATEWAY_HOST", "127.0.0.1")
-    port = int(os.getenv("GATEWAY_PORT", "3336"))
+    host = config.gateway_host()
+    port = config.gateway_port()
     url = f"ws://{host}:{port}/ws"
 
-    device_id = os.getenv("DEVICE_ID", "cli")
+    device_id = config.cli_device_id()
     client_type = "cli"
 
     runs: Dict[str, RunBuffer] = {}
@@ -102,7 +103,7 @@ async def main() -> None:
                 print("Allow? [y/N] ", end="", flush=True)
                 return
 
-            if event_type in ("run.status", "run.log", "run.error", "run.final", "run.token"):
+            if event_type in ("run.status", "run.log", "run.error", "run.final", "run.token", "run.tool_call", "run.tool_result"):
                 run_id = payload.get("runId", "")
                 if run_id and run_id not in runs:
                     runs[run_id] = RunBuffer(run_id=run_id)
@@ -123,6 +124,10 @@ async def main() -> None:
                         printer.done(run_id)
                 elif event_type == "run.token":
                     printer.token(run_id, payload.get("content", ""))
+                elif event_type == "run.tool_call":
+                    printer.log(run_id, f"tool_call: {payload.get('toolName','')} {payload.get('arguments',{})}")
+                elif event_type == "run.tool_result":
+                    printer.log(run_id, f"tool_result: {payload.get('toolName','')} {payload.get('ok', True)}")
 
         async def handle_response(msg: dict):
             if msg.get("ok") is False:
@@ -168,4 +173,3 @@ async def main() -> None:
                     await send_run(line)
 
         await asyncio.gather(receiver(), sender())
-
