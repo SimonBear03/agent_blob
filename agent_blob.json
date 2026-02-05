@@ -22,7 +22,7 @@
   },
   "skills": {
     "dirs": ["./skills", "./agent_blob/runtime/skills/examples"],
-    "enabled": ["general"],
+    "enabled": ["general", "summarize", "skill-creator", "obsidian"],
     "max_chars": 12000
   },
   "mcp": {
@@ -43,7 +43,7 @@
   },
   "permissions": {
     "deny": [],
-    "ask": ["shell.run", "git.*", "web.*", "filesystem.write", "memory.delete", "mcp.call"],
+    "ask": ["shell.run", "git.*", "web.*", "filesystem.write", "memory.delete", "mcp.call", "web.fetch"],
     "allow": ["filesystem.read", "filesystem.list", "tasks.*", "memory.search", "memory.list", "skills.*", "mcp.list", "mcp.refresh"]
   }
 }
