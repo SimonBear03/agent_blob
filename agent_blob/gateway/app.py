@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from agent_blob.protocol import EventType, create_event, create_response
 from agent_blob.policy.policy import Policy
 from agent_blob.runtime.runtime import Runtime
+from agent_blob import config
 
 load_dotenv()
 
@@ -56,9 +57,11 @@ class Gateway:
                 self.clients.pop(ws, None)
 
     async def _supervisor_loop(self):
-        interval_s = float(os.getenv("SUPERVISOR_INTERVAL_S", "15"))
-        debug_ticks = os.getenv("SUPERVISOR_DEBUG", "0") in ("1", "true", "yes", "on")
+        interval_s = config.supervisor_interval_s()
+        debug_ticks = config.supervisor_debug()
         last_active_count: int | None = None
+        last_maintenance_s: float = 0.0
+        maintenance_interval_s = config.maintenance_interval_s()
         while True:
             try:
                 tasks = await self.runtime.tasks.list_tasks()
@@ -69,6 +72,23 @@ class Gateway:
                     msg = f"supervisor: active_tasks={active_count}"
                     await self._broadcast_event(create_event(EventType.RUN_LOG, {"runId": "supervisor", "message": msg}))
                 last_active_count = active_count
+
+                now = asyncio.get_running_loop().time()
+                if now - last_maintenance_s >= maintenance_interval_s:
+                    last_maintenance_s = now
+                    stats = await self.runtime.maintenance()
+                    removed = ((stats.get("tasks") or {}).get("removed")) if isinstance(stats, dict) else 0
+                    mem_added = stats.get("memory_added") if isinstance(stats, dict) else 0
+                    if debug_ticks or removed or mem_added:
+                        await self._broadcast_event(
+                            create_event(
+                                EventType.RUN_LOG,
+                                {
+                                    "runId": "supervisor",
+                                    "message": f"maintenance: tasks_removed={removed} memory_added={mem_added}",
+                                },
+                            )
+                        )
             except Exception as e:
                 await self._broadcast_event(create_event(EventType.RUN_LOG, {"runId": "supervisor", "message": f"supervisor error: {e}"}))
             await asyncio.sleep(interval_s)

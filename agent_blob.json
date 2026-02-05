@@ -1,6 +1,27 @@
 {
   "gateway": { "host": "127.0.0.1", "port": 3336 },
   "data": { "dir": "./data" },
+  "llm": {
+    "model_name": "gpt-4o-mini"
+  },
+  "memory": {
+    "extraction_model": null,
+    "importance_min": 6
+  },
+  "supervisor": {
+    "interval_s": 15,
+    "debug": false,
+    "maintenance_interval_s": 60
+  },
+  "clients": {
+    "cli": {
+      "device_id": "cli"
+    }
+  },
+  "tools": {
+    "allowed_fs_root": null
+  },
+  "maintenance": { "tasks_keep_done_days": 30, "tasks_keep_done_max": 200 },
   "permissions": {
     "deny": [],
     "ask": ["shell.run", "git.*", "web.*", "filesystem.write"],

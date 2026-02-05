@@ -12,6 +12,7 @@ import websockets
 from dotenv import load_dotenv
 
 from agent_blob.clients.common.printer import Printer
+from agent_blob import config
 
 
 def _new_id(prefix: str) -> str:
@@ -38,11 +39,11 @@ async def _stdin_lines(queue: asyncio.Queue[str]):
 async def main() -> None:
     load_dotenv()
 
-    host = os.getenv("GATEWAY_HOST", "127.0.0.1")
-    port = int(os.getenv("GATEWAY_PORT", "3336"))
+    host = config.gateway_host()
+    port = config.gateway_port()
     url = f"ws://{host}:{port}/ws"
 
-    device_id = os.getenv("DEVICE_ID", "cli")
+    device_id = config.cli_device_id()
     client_type = "cli"
 
     runs: Dict[str, RunBuffer] = {}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 
@@ -57,3 +58,19 @@ class OpenAIChatCompletionsProvider:
         )
         async for chunk in stream:
             yield chunk
+
+    async def chat_json(self, *, model: str, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Non-streaming JSON response (used for memory extraction / consolidation).
+        """
+        resp = await self._client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        content = resp.choices[0].message.content or "{}"
+        try:
+            return json.loads(content)
+        except Exception:
+            return {}

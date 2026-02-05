@@ -16,6 +16,8 @@ from agent_blob.runtime.tools.filesystem import filesystem_read, filesystem_list
 from agent_blob.runtime.tools.shell import shell_run
 from agent_blob.runtime.llm import OpenAIChatCompletionsProvider
 from agent_blob.runtime.tools.registry import ToolDefinition, ToolRegistry
+from agent_blob.runtime.memory import MemoryExtractor
+from agent_blob.config import load_config, llm_model_name
 
 
 AskPermission = Callable[..., Awaitable[str]]
@@ -36,6 +38,7 @@ class Runtime:
         self.schedules = SchedulerStore()
         self._llm = None
         self.tools = ToolRegistry(self._default_tools())
+        self.memory_extractor = MemoryExtractor()
 
     async def startup(self):
         await self.event_log.startup()
@@ -44,6 +47,22 @@ class Runtime:
         await self.schedules.startup()
         # Lazily construct provider on first use so the gateway can start even if OPENAI_API_KEY is not set,
         # as long as the user doesn't send an LLM-backed request.
+
+    async def maintenance(self) -> dict:
+        """
+        Periodic maintenance hook for the supervisor:
+        - purge old completed tasks from tasks.json
+        - consolidate structured memories incrementally
+        """
+        cfg = load_config()
+        maint = (cfg.get("maintenance") or {}) if isinstance(cfg, dict) else {}
+        keep_days = int(maint.get("tasks_keep_done_days", 30) or 30)
+        keep_max = int(maint.get("tasks_keep_done_max", 200) or 200)
+        purge_stats = await self.tasks.purge_done(keep_days=keep_days, keep_max=keep_max)
+
+        # Consolidate structured candidates into state (cheap incremental).
+        added = await self.memory.consolidate()
+        return {"tasks": purge_stats, "memory_added": added}
 
     async def run(
         self,
@@ -58,7 +77,9 @@ class Runtime:
 
         yield create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "retrieving_memory"})
         pinned = await self.memory.get_pinned()
-        related = await self.memory.search(user_input, limit=5)
+        recent_turns = await self.event_log.recent_turns(limit=8)
+        related = await self.event_log.search_turns(user_input, limit=5)
+        structured = await self.memory.search_structured(user_input, limit=5)
 
         # Minimal agent loop for V2:
         # - keep explicit smoke-test commands for tools
@@ -102,9 +123,21 @@ class Runtime:
 
             await self.event_log.append({"type": "run.output", "runId": run_id, "text": response_text})
             await self.memory.observe_turn(run_id=run_id, user_text=user_input, assistant_text=response_text)
+            mem_stats = await self._extract_and_store_memories(run_id=run_id, user_text=user_input, assistant_text=response_text)
+            if mem_stats.get("pinned_added") or mem_stats.get("structured_written"):
+                yield create_event(
+                    EventType.RUN_LOG,
+                    {"runId": run_id, "message": f"memory saved: pinned_added={mem_stats.get('pinned_added')} structured={mem_stats.get('structured_written')}"},
+                )
         else:
-            model = os.getenv("MODEL_NAME", "gpt-4o-mini")
-            base_messages = self._build_messages(user_input=user_input, pinned=pinned, related=related)
+            model = llm_model_name()
+            base_messages = self._build_messages(
+                user_input=user_input,
+                pinned=pinned,
+                related=related,
+                structured=structured,
+                recent_turns=recent_turns,
+            )
 
             if self._llm is None:
                 self._llm = OpenAIChatCompletionsProvider()
@@ -124,6 +157,12 @@ class Runtime:
 
             await self.event_log.append({"type": "run.output", "runId": run_id, "text": assistant_text})
             await self.memory.observe_turn(run_id=run_id, user_text=user_input, assistant_text=assistant_text)
+            mem_stats = await self._extract_and_store_memories(run_id=run_id, user_text=user_input, assistant_text=assistant_text)
+            if mem_stats.get("pinned_added") or mem_stats.get("structured_written"):
+                yield create_event(
+                    EventType.RUN_LOG,
+                    {"runId": run_id, "message": f"memory saved: pinned_added={mem_stats.get('pinned_added')} structured={mem_stats.get('structured_written')}"},
+                )
         await self.tasks.mark_done(task_id=task_id)
 
         yield create_event(EventType.RUN_FINAL, {"runId": run_id})
@@ -131,15 +170,55 @@ class Runtime:
     def _chunk_text(self, text: str, n: int) -> list[str]:
         return [text[i : i + n] for i in range(0, len(text), n)]
 
-    def _build_messages(self, *, user_input: str, pinned: list[dict], related: list[dict]) -> list[dict]:
+    def _build_messages(
+        self,
+        *,
+        user_input: str,
+        pinned: list[dict],
+        related: list[dict],
+        structured: list[dict],
+        recent_turns: list[dict],
+    ) -> list[dict]:
         system = "You are Agent Blob, a helpful always-on master AI. Be concise and actionable."
         msgs: list[dict] = [{"role": "system", "content": system}]
         if pinned:
             msgs.append({"role": "system", "content": f"Pinned memory (authoritative): {pinned}"})
+        if structured:
+            msgs.append({"role": "system", "content": f"Structured long-term memories (high confidence): {structured}"})
         if related:
             msgs.append({"role": "system", "content": f"Potentially relevant past notes (may be partial): {related}"})
+        for t in recent_turns:
+            u = t.get("user")
+            a = t.get("assistant")
+            if isinstance(u, str) and u:
+                msgs.append({"role": "user", "content": u})
+            if isinstance(a, str) and a:
+                msgs.append({"role": "assistant", "content": a})
         msgs.append({"role": "user", "content": user_input})
         return msgs
+
+    async def _extract_and_store_memories(self, *, run_id: str, user_text: str, assistant_text: str) -> dict:
+        """
+        Best-effort memory extraction. Never fails the run.
+        Returns a small stats dict for optional logging.
+        """
+        stats = {"pinned_added": False, "structured_written": 0, "error": None}
+        try:
+            if self._llm is None:
+                self._llm = OpenAIChatCompletionsProvider()
+            memories = await self.memory_extractor.extract(llm=self._llm, user_text=user_text, assistant_text=assistant_text)
+            if not memories:
+                await self.event_log.append({"type": "memory.extracted", "runId": run_id, "count": 0})
+                return stats
+            written = await self.memory.save_structured_memories(run_id=run_id, memories=memories)
+            stats["structured_written"] = written
+            # Update consolidated state (dedupe/merge) incrementally.
+            await self.memory.consolidate()
+            await self.event_log.append({"type": "memory.extracted", "runId": run_id, "count": written})
+        except Exception as e:
+            stats["error"] = str(e)
+            await self.event_log.append({"type": "memory.extract_error", "runId": run_id, "error": str(e)})
+        return stats
 
     def _default_tools(self) -> List[ToolDefinition]:
         async def _fs_read(args: Dict[str, Any]) -> Any:

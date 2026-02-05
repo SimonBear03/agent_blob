@@ -16,7 +16,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
- # Set OPENAI_API_KEY and (optionally) MODEL_NAME=gpt-4o-mini in .env
+ # Set OPENAI_API_KEY in .env
+ # Configure non-secrets in agent_blob.json (model_name, ports, retention, etc.)
 
 python3 scripts/run_gateway.py
 python3 scripts/cli.py
@@ -46,3 +47,5 @@ agent_blob.json   # policy + data dir config
 - **Permissions** are controlled by `agent_blob.json` (`deny` > `ask` > `allow`). Shell commands default to `ask`.
 - **Filesystem tool root** is controlled by `ALLOWED_FS_ROOT` (defaults to current working directory).
 - **Supervisor** emits only on change by default; set `SUPERVISOR_DEBUG=1` to log periodic ticks. Interval via `SUPERVISOR_INTERVAL_S` (default `15`).
+- **Memory** writes: `data/pinned.json` (always loaded), `data/memories.jsonl` (structured candidates), `data/memory_state.json` (consolidated state).
+- **events.jsonl** is the canonical log; recent turns + episodic recall are derived from it (not from a separate “session” store).

@@ -14,9 +14,10 @@ if __name__ == "__main__":
     sys.path.insert(0, str(root_dir))
 
     from agent_blob.gateway.app import create_app
+    from agent_blob import config
 
-    host = os.getenv("GATEWAY_HOST", "127.0.0.1")
-    port = int(os.getenv("GATEWAY_PORT", "3336"))
+    host = config.gateway_host()
+    port = config.gateway_port()
 
     app = create_app()
     uvicorn.run(app, host=host, port=port)

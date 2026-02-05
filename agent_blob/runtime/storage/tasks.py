@@ -68,6 +68,47 @@ class TaskStore:
         tasks.sort(key=lambda t: float(t.get("updated_at", 0)), reverse=True)
         return tasks
 
+    async def purge_done(self, *, keep_days: int = 30, keep_max: int = 200) -> dict:
+        """
+        Purge completed/cancelled/failed tasks from tasks.json, keeping:
+        - all non-terminal tasks
+        - terminal tasks updated within keep_days
+        - at most keep_max terminal tasks (most recent)
+
+        Returns {removed:int, kept:int}.
+        """
+        data = self._load()
+        now = time.time()
+        cutoff = now - (keep_days * 86400)
+
+        terminal_statuses = {"done", "cancelled", "failed"}
+        terminal = []
+        active = {}
+
+        for tid, t in list(data.items()):
+            status = str(t.get("status", "") or "")
+            updated = float(t.get("updated_at", 0) or 0)
+            if status in terminal_statuses:
+                terminal.append((updated, tid, t))
+            else:
+                active[tid] = t
+
+        # Keep terminal tasks within retention window
+        terminal_kept = [(u, tid, t) for (u, tid, t) in terminal if u >= cutoff]
+        terminal_kept.sort(key=lambda x: x[0], reverse=True)
+        terminal_kept = terminal_kept[: max(0, int(keep_max))]
+
+        new_data = dict(active)
+        for _, tid, t in terminal_kept:
+            new_data[tid] = t
+
+        removed = len(data) - len(new_data)
+        if removed > 0:
+            self._save(new_data)
+            self._append_event({"type": "tasks.purged", "removed": removed, "kept": len(new_data)})
+
+        return {"removed": removed, "kept": len(new_data)}
+
     def _append_event(self, ev: dict) -> None:
         with self._events.open("a", encoding="utf-8") as f:
             f.write(json.dumps(ev, ensure_ascii=False) + "\n")

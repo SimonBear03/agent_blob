@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from agent_blob import config
 
 def _allowed_root() -> Path:
-    root = os.getenv("ALLOWED_FS_ROOT") or os.getcwd()
+    root = config.allowed_fs_root() or os.getcwd()
     return Path(root).resolve()
 
 
