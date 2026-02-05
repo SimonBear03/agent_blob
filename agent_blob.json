@@ -1,6 +1,11 @@
 {
-  "gateway": { "host": "127.0.0.1", "port": 3336 },
-  "data": { "dir": "./data" },
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 3336
+  },
+  "data": {
+    "dir": "./data"
+  },
   "llm": {
     "model_name": "gpt-4o-mini"
   },
@@ -8,7 +13,12 @@
     "extraction_model": null,
     "importance_min": 6,
     "embedding_model": "text-embedding-3-small",
-    "embeddings": { "enabled": true, "batch_size": 16, "vector_scan_limit": 2000, "vector_top_k": 50 }
+    "embeddings": {
+      "enabled": true,
+      "batch_size": 16,
+      "vector_scan_limit": 2000,
+      "vector_top_k": 50
+    }
   },
   "supervisor": {
     "interval_s": 15,
@@ -21,8 +31,16 @@
     }
   },
   "skills": {
-    "dirs": ["./skills", "./agent_blob/runtime/skills/examples"],
-    "enabled": ["general", "summarize", "skill-creator", "obsidian"],
+    "dirs": [
+      "./skills",
+      "./agent_blob/runtime/skills/examples"
+    ],
+    "enabled": [
+      "general",
+      "summarize",
+      "skill-creator",
+      "obsidian"
+    ],
     "max_chars": 12000
   },
   "mcp": {
@@ -35,15 +53,51 @@
     "attach_window_s": 1800,
     "auto_close_after_s": 21600
   },
-  "maintenance": { "tasks_keep_done_days": 30, "tasks_keep_done_max": 200 },
+  "maintenance": {
+    "tasks_keep_done_days": 30,
+    "tasks_keep_done_max": 200
+  },
   "logs": {
-    "events": { "max_bytes": 20000000, "keep_days": 14, "keep_max_files": 50 },
-    "tasks_events": { "max_bytes": 5000000, "keep_days": 30, "keep_max_files": 50 },
-    "memories": { "max_bytes": 5000000, "keep_days": 30, "keep_max_files": 50 }
+    "events": {
+      "max_bytes": 20000000,
+      "keep_days": 14,
+      "keep_max_files": 50
+    },
+    "tasks_events": {
+      "max_bytes": 5000000,
+      "keep_days": 30,
+      "keep_max_files": 50
+    },
+    "memories": {
+      "max_bytes": 5000000,
+      "keep_days": 30,
+      "keep_max_files": 50
+    }
   },
   "permissions": {
+    "remember": false,
     "deny": [],
-    "ask": ["shell.run", "git.*", "web.*", "filesystem.write", "memory.delete", "mcp.call", "web.fetch"],
-    "allow": ["filesystem.read", "filesystem.list", "tasks.*", "memory.search", "memory.list", "skills.*", "mcp.list", "mcp.refresh"]
+    "ask": [
+      "git.*",
+      "web.*",
+      "filesystem.write",
+      "memory.delete",
+      "mcp.call",
+      "web.fetch",
+      "shell.run",
+      "shell.write"
+    ],
+    "allow": [
+      "filesystem.read",
+      "filesystem.list",
+      "filesystem.glob",
+      "filesystem.grep",
+      "tasks.*",
+      "memory.search",
+      "memory.list",
+      "skills.*",
+      "mcp.list",
+      "mcp.refresh"
+    ]
   }
 }

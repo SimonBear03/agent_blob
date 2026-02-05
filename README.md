@@ -48,11 +48,11 @@ agent_blob.json   # policy + data dir config
 ## Notes
 
 - **Permissions** are controlled by `agent_blob.json` (`deny` > `ask` > `allow`). Shell commands default to `ask`.
+- Interactive approvals are **not persisted by default** (`permissions.remember: false`).
 - **Filesystem tool root** is controlled by `agent_blob.json` at `tools.allowed_fs_root` (defaults to current working directory).
 - **Supervisor** emits only on change by default. Configure via `agent_blob.json` at `supervisor.interval_s`, `supervisor.debug`, and `supervisor.maintenance_interval_s`.
 - **Memory** writes: `data/pinned.json` (always loaded), `data/memories.jsonl` (structured candidates/audit), `data/agent_blob.sqlite` (consolidated memory state + BM25 + embeddings).
 - **events.jsonl** is the canonical log; recent turns + episodic recall are derived from it (not from a separate “session” store).
-- **MCP**: `agent_blob/runtime/mcp/` is a scaffold for future MCP server integration (quant module, econ DB, etc.). No MCP networking is wired yet.
 - **Skills**: local `SKILL.md` files in `skills/` (and any other dirs configured in `agent_blob.json`) are injected as enabled skills and can be listed/read via `skills_list`/`skills_get`.
 - **MCP**: `agent_blob/runtime/mcp/` implements MCP Streamable HTTP. Configure servers in `agent_blob.json` under `mcp.servers`, then use `mcp_list_tools` + `mcp_call` (or `mcp_refresh`).
 - **Web fetch**: `web_fetch` can fetch URLs for summarization/research (permission-gated).
@@ -61,12 +61,12 @@ agent_blob.json   # policy + data dir config
 
 Agent Blob keeps an append-only audit trail plus small “current state” snapshots in `data/`.
 
-- `data/events.jsonl`: canonical event log (not purged yet; rotation/archival planned).
+- `data/events.jsonl`: canonical event log (rotated/pruned by log rotation policy).
 - `data/tasks.json`: current task snapshot (purged by retention policy).
-- `data/tasks_events.jsonl`: task history/audit (not purged yet; rotation/archival planned).
+- `data/tasks_events.jsonl`: task history/audit (rotated/pruned by log rotation policy).
 - `data/schedules.json`: schedule definitions (not purged).
 - `data/pinned.json`: pinned memory (not automatically purged).
-- `data/memories.jsonl`: extracted structured memory candidates (not purged yet; rotation/archival planned).
+- `data/memories.jsonl`: extracted structured memory candidates (rotated/pruned by log rotation policy).
 - `data/agent_blob.sqlite`: consolidated/deduped structured memory (SQLite + FTS5 + embeddings).
 - `data/archives/`: rotated JSONL logs + `index.json` (simple archive index).
 
@@ -112,6 +112,38 @@ The agent can manage structured memories without using the shell:
 - `memory_search` (capability `memory.search`) — find items + ids
 - `memory_list_recent` (capability `memory.list`) — show recent items
 - `memory_delete` (capability `memory.delete`) — delete by id (defaults to `ask`)
+
+### Filesystem write tool
+
+`filesystem_write` (capability `filesystem.write`) is permission-gated and shows a unified diff preview before writing.
+
+### Shell command safety
+
+`shell_run` (capability `shell.run`) is permission-gated. Commands that look like they **modify files** (redirections like `>`/`>>`, `tee`, `sed -i`, `rm`, etc.) are treated as `shell.write` and will prompt separately.
+
+## Testing checklist
+
+1) **Permission prompt**
+   - Trigger a permission prompt (e.g. ask “run `echo hi` in the shell”).
+   - Confirm you can answer `y` (allow) or `n` (deny).
+
+2) **filesystem_write preview**
+   - Ask: “Create `tmp/test.txt` with the content ‘hello’.”
+   - Confirm the permission preview shows a diff and, if you allow, the file is written.
+   - Ask: “Update `tmp/test.txt` to add a second line ‘world’.”
+   - Confirm the diff shows the change.
+
+3) **Find + edit workflow (Claude/Codex-style)**
+   - Ask: “Find the file that contains `agent_blob.json` permissions and show me where `filesystem.write` is mentioned.”
+   - Confirm the agent uses `fs_grep` (safe) and/or `filesystem_read`.
+   - Ask: “In `tmp/test.txt`, change `hello` to `hello!`.”
+   - Confirm the agent uses `edit_apply_patch` and you see a diff preview.
+
+3) **MCP**
+   - Run `mcp_list_tools` and `mcp_call` against your configured MCP server.
+
+4) **Skills**
+   - Ask “list skills” and “get skill summarize”.
 
 ## Skills
 

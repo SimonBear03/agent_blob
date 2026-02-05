@@ -89,7 +89,7 @@ class MCPClientManager:
         if s.transport != "streamable-http":
             raise RuntimeError(f"Unsupported MCP transport: {s.transport}")
 
-        # Resolve tool name: prefer exact; else allow unique suffix matches like "add" -> "demo.add".
+        # Resolve tool name: prefer exact; else allow unique suffix matches like "add" -> "quant.add".
         resolved = await self._resolve_tool_name(server=server, name=name)
 
         client = MCPStreamableHttpClient(base_url=s.url)
@@ -114,7 +114,7 @@ class MCPClientManager:
         if raw in names:
             return raw
 
-        # If no dot, try prefixing with server name (common for demo.*).
+        # If no dot, try prefixing with server name.
         if "." not in raw:
             pref = f"{server}.{raw}"
             if pref in names:

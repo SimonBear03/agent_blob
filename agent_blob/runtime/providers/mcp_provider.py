@@ -87,5 +87,5 @@ class MCPProvider:
             + "\n".join([f"- {s['name']}: {s['url']} ({s['transport']})" for s in servers])
             + "\nUse mcp_list_tools (or mcp_refresh) to discover tool schemas, then call them via mcp_call.\n"
             + "When calling mcp_call you MUST include an 'arguments' object that matches the tool's inputSchema.\n"
-            + "Always use the exact tool name from mcp_list_tools (e.g. 'demo.add', not 'add').\n"
+            + "Always use the exact tool name from mcp_list_tools.\n"
         )

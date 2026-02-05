@@ -4,6 +4,8 @@ import asyncio
 import os
 import json
 import time
+import difflib
+import re
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Optional, List
 
@@ -18,6 +20,7 @@ from agent_blob.runtime.tools.registry import ToolDefinition, ToolRegistry
 from agent_blob.runtime.memory import MemoryExtractor
 from agent_blob.runtime.capabilities.registry import CapabilityRegistry
 from agent_blob.runtime.providers import LocalProvider, SkillsProvider, MCPProvider
+from agent_blob.runtime.tools.filesystem import filesystem_read_optional
 from agent_blob.config import (
     load_config,
     llm_model_name,
@@ -185,70 +188,38 @@ class Runtime:
             yield create_event(EventType.RUN_FINAL, {"runId": run_id})
             return
 
-        actions = self._parse_actions(user_input)
-        if actions:
-            response_text_parts: list[str] = []
-            for act in actions:
-                kind = act["kind"]
-                if kind == "fs.read":
-                    out = await self._tool_filesystem_read(tool_ctx, act["path"])
-                    response_text_parts.append(out)
-                elif kind == "fs.list":
-                    out = await self._tool_filesystem_list(tool_ctx, act["path"])
-                    response_text_parts.append(out)
-                elif kind == "shell":
-                    out = await self._tool_shell(tool_ctx, act["command"])
-                    response_text_parts.append(out)
+        model = llm_model_name()
+        base_messages = self._build_messages(
+            user_input=user_input,
+            pinned=pinned,
+            related=related,
+            structured=structured,
+            recent_turns=recent_turns,
+        )
 
-            response_text = "".join(response_text_parts)
-            yield create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "streaming"})
-            for part in self._chunk_text(response_text, 240):
-                yield create_event(EventType.RUN_TOKEN, {"runId": run_id, "content": part})
-                await asyncio.sleep(0)
+        if self._llm is None:
+            self._llm = OpenAIChatCompletionsProvider()
 
-            await self.event_log.append({"type": "run.output", "runId": run_id, "taskId": task_id, "text": response_text})
-            await self.memory.observe_turn(run_id=run_id, user_text=user_input, assistant_text=response_text)
-            mem_stats = await self._extract_and_store_memories(run_id=run_id, user_text=user_input, assistant_text=response_text)
-            if mem_stats.get("pinned_added") or mem_stats.get("structured_written"):
-                yield create_event(
-                    EventType.RUN_LOG,
-                    {"runId": run_id, "message": f"memory saved: pinned_added={mem_stats.get('pinned_added')} structured={mem_stats.get('structured_written')}"},
-                )
-        else:
-            model = llm_model_name()
-            base_messages = self._build_messages(
-                user_input=user_input,
-                pinned=pinned,
-                related=related,
-                structured=structured,
-                recent_turns=recent_turns,
+        try:
+            assistant_text = ""
+            async for ev in self._stream_agent_loop_with_tools(run_id=run_id, model=model, messages=base_messages, tool_ctx=tool_ctx):
+                if ev.get("event") == EventType.RUN_TOKEN:
+                    assistant_text += (ev.get("payload") or {}).get("content", "")
+                yield ev
+        except Exception as e:
+            await self.event_log.append({"type": "run.error", "runId": run_id, "taskId": task_id, "error": str(e)})
+            await self.tasks.set_status(task_id=task_id, status="open")
+            yield create_event(EventType.RUN_ERROR, {"runId": run_id, "message": str(e)})
+            return
+
+        await self.event_log.append({"type": "run.output", "runId": run_id, "taskId": task_id, "text": assistant_text})
+        await self.memory.observe_turn(run_id=run_id, user_text=user_input, assistant_text=assistant_text)
+        mem_stats = await self._extract_and_store_memories(run_id=run_id, user_text=user_input, assistant_text=assistant_text)
+        if mem_stats.get("pinned_added") or mem_stats.get("structured_written"):
+            yield create_event(
+                EventType.RUN_LOG,
+                {"runId": run_id, "message": f"memory saved: pinned_added={mem_stats.get('pinned_added')} structured={mem_stats.get('structured_written')}"},
             )
-
-            if self._llm is None:
-                self._llm = OpenAIChatCompletionsProvider()
-
-            try:
-                assistant_text = ""
-                async for ev in self._stream_agent_loop_with_tools(
-                    run_id=run_id, model=model, messages=base_messages, tool_ctx=tool_ctx
-                ):
-                    if ev.get("event") == EventType.RUN_TOKEN:
-                        assistant_text += (ev.get("payload") or {}).get("content", "")
-                    yield ev
-            except Exception as e:
-                await self.event_log.append({"type": "run.error", "runId": run_id, "taskId": task_id, "error": str(e)})
-                await self.tasks.set_status(task_id=task_id, status="open")
-                yield create_event(EventType.RUN_ERROR, {"runId": run_id, "message": str(e)})
-                return
-
-            await self.event_log.append({"type": "run.output", "runId": run_id, "taskId": task_id, "text": assistant_text})
-            await self.memory.observe_turn(run_id=run_id, user_text=user_input, assistant_text=assistant_text)
-            mem_stats = await self._extract_and_store_memories(run_id=run_id, user_text=user_input, assistant_text=assistant_text)
-            if mem_stats.get("pinned_added") or mem_stats.get("structured_written"):
-                yield create_event(
-                    EventType.RUN_LOG,
-                    {"runId": run_id, "message": f"memory saved: pinned_added={mem_stats.get('pinned_added')} structured={mem_stats.get('structured_written')}"},
-                )
         await self.tasks.set_status(task_id=task_id, status="open")
 
         yield create_event(EventType.RUN_FINAL, {"runId": run_id})
@@ -269,6 +240,8 @@ class Runtime:
             "You are Agent Blob, a helpful always-on master AI. Be concise and actionable.\n"
             "Never write to project files or run shell commands just to 'remember' something. Use the memory system instead.\n"
             "For memory management, use memory_search/memory_list_recent to find items and memory_delete to remove them.\n"
+            "For file edits, prefer fs_glob/fs_grep/filesystem_read to locate the right file, then use edit_apply_patch for changes.\n"
+            "Do NOT use shell_run to modify files (e.g. '>', '>>', 'tee', 'sed -i'). Use filesystem_write or edit_apply_patch.\n"
             "Only use tools when necessary to complete a user-requested task."
         )
         cap_instructions = self.capabilities.system_instructions()
@@ -430,11 +403,27 @@ class Runtime:
                     )
                     continue
 
+                preview = json.dumps(args, ensure_ascii=False)
+                # For file writes, show a unified diff instead of raw JSON arguments.
+                if tool_def.capability == "filesystem.write":
+                    if tool_def.name == "edit_apply_patch":
+                        preview = await self._preview_edit_apply_patch(args)
+                    else:
+                        preview = await self._preview_filesystem_write(args)
+
+                effective_capability = tool_def.capability
+                # Treat shell commands that modify files as a separate high-risk capability, so users can
+                # allow `shell.run` for safe read-only commands but still be prompted for writes.
+                if tool_def.capability == "shell.run":
+                    cmd = str(args.get("command", "") or "")
+                    if self._shell_command_writes_files(cmd):
+                        effective_capability = "shell.write"
+
                 await self._enforce(
                     tool_ctx,
-                    tool_def.capability,
-                    preview=json.dumps(args, ensure_ascii=False),
-                    reason=f"Tool call: {tool_def.capability}",
+                    effective_capability,
+                    preview=preview,
+                    reason=f"Tool call: {effective_capability}",
                 )
 
                 try:
@@ -451,6 +440,93 @@ class Runtime:
             messages = messages + tool_results_msgs
 
         yield create_event(EventType.RUN_LOG, {"runId": run_id, "message": "Reached max tool-calling rounds."})
+
+    def _shell_command_writes_files(self, command: str) -> bool:
+        """
+        Heuristic: commands that likely modify files should require a stronger approval signal.
+        This mirrors the "prefer patch-based edits" behavior in Codex/Claude-style tools.
+        """
+        s = (command or "").strip()
+        if not s:
+            return False
+
+        # Redirections almost always imply file writes.
+        if ">>" in s or ">" in s:
+            return True
+
+        # Common write-ish patterns.
+        patterns = [
+            r"\btee\b",  # often used to write files (even without redirection)
+            r"\bsed\s+-i\b",
+            r"\bperl\s+-pi\b",
+            r"\brm\b",
+            r"\bmv\b",
+            r"\bcp\b",
+            r"\btruncate\b",
+            r"\btouch\b",
+            r"\bchmod\b",
+            r"\bchown\b",
+            r"\bgit\s+commit\b",
+            r"\bgit\s+push\b",
+            r"\bgit\s+reset\b",
+            r"\bgit\s+checkout\b",
+            r"\bgit\s+switch\b",
+            r"\bgit\s+clean\b",
+        ]
+        for pat in patterns:
+            if re.search(pat, s):
+                return True
+        return False
+
+    async def _preview_filesystem_write(self, args: Dict[str, Any]) -> str:
+        path = str(args.get("path", "") or "")
+        new = str(args.get("content", "") or "")
+        append = bool(args.get("append", False))
+        old_res = await filesystem_read_optional(path)
+        if not old_res.get("ok"):
+            return json.dumps({"path": path, "error": old_res.get("error")}, ensure_ascii=False)
+        old = str(old_res.get("content", "") or "")
+        if append:
+            # Mirror filesystem_write() behavior: ensure newline when appending to non-empty file.
+            to_write = new
+            if old and (not old.endswith("\n")) and to_write and (not to_write.startswith("\n")):
+                to_write = "\n" + to_write
+            old_for_diff = old
+            new_for_diff = old + to_write
+        else:
+            old_for_diff = old
+            new_for_diff = new
+        diff = difflib.unified_diff(
+            old_for_diff.splitlines(keepends=True),
+            new_for_diff.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            n=3,
+        )
+        text = "".join(diff)
+        if not text:
+            text = f"(no changes) path={path}"
+        # Hard cap preview size
+        if len(text) > 8000:
+            text = text[:8000] + "\n... (truncated)\n"
+        return text
+
+    async def _preview_edit_apply_patch(self, args: Dict[str, Any]) -> str:
+        path = str(args.get("path", "") or "")
+        patch = str(args.get("patch", "") or "")
+        if not path or not patch:
+            return json.dumps({"path": path, "error": "path and patch are required"}, ensure_ascii=False)
+        from agent_blob.runtime.tools.edit import edit_preview_patch
+
+        res = await edit_preview_patch(path=path, patch=patch)
+        if not res.get("ok"):
+            return json.dumps({"path": path, "error": res.get("error")}, ensure_ascii=False)
+        text = str(res.get("preview", "") or "")
+        if not text:
+            text = f"(no changes) path={path}"
+        if len(text) > 8000:
+            text = text[:8000] + "\n... (truncated)\n"
+        return text
 
     async def _maybe_introspect(self, *, user_input: str) -> Optional[str]:
         q = (user_input or "").lower()
@@ -490,16 +566,6 @@ class Runtime:
 
         return "\n".join(out) + "\n"
 
-    def _parse_actions(self, user_input: str) -> list[dict]:
-        s = user_input.strip()
-        if s.startswith("read "):
-            return [{"kind": "fs.read", "path": s[5:].strip()}]
-        if s.startswith("ls "):
-            return [{"kind": "fs.list", "path": s[3:].strip()}]
-        if s.startswith("sh "):
-            return [{"kind": "shell", "command": s[3:].strip()}]
-        return []
-
     async def _enforce(self, ctx: ToolContext, capability: str, preview: str, reason: str) -> None:
         decision = ctx.policy.check(capability)
         if decision.decision == "allow":
@@ -509,18 +575,3 @@ class Runtime:
         choice = await ctx.ask_permission(run_id=ctx.run_id, capability=capability, preview=preview, reason=reason)
         if choice != "allow":
             raise PermissionError(f"Denied by user: {capability}")
-
-    async def _tool_filesystem_read(self, ctx: ToolContext, path: str) -> str:
-        await self._enforce(ctx, "filesystem.read", preview=path, reason="Read file contents")
-        res = await filesystem_read(path)
-        return f"\n[filesystem.read] {res}\n"
-
-    async def _tool_filesystem_list(self, ctx: ToolContext, path: str) -> str:
-        await self._enforce(ctx, "filesystem.list", preview=path, reason="List directory")
-        res = await filesystem_list(path)
-        return f"\n[filesystem.list] {res}\n"
-
-    async def _tool_shell(self, ctx: ToolContext, command: str) -> str:
-        await self._enforce(ctx, "shell.run", preview=command, reason="Run shell command")
-        res = await shell_run(command)
-        return f"\n[shell.run]\n{res}\n"

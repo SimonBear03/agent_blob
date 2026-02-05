@@ -141,9 +141,20 @@ class Gateway:
         params = (req.get("params") or {})
         request_id = params.get("requestId", "")
         decision = params.get("decision", "deny")
+        remember = bool(params.get("remember", False))
+        capability = params.get("capability")
         fut = self._permission_waiters.get(request_id)
         if fut and not fut.done():
             fut.set_result(decision)
+            # Optional persistence of interactive approvals (disabled by default).
+            cfg = config.load_config()
+            remember_enabled = bool(((cfg.get("permissions") or {}).get("remember")) if isinstance(cfg, dict) else False)
+            if remember_enabled and remember and isinstance(capability, str) and capability:
+                try:
+                    Policy.persist_decision(capability=capability, decision=decision)
+                    self.policy = Policy.load()
+                except Exception:
+                    pass
             await websocket.send_json(create_response(req.get("id", "unknown"), ok=True, payload={"requestId": request_id}))
             return
         await websocket.send_json(create_response(req.get("id", "unknown"), ok=False, error="Unknown or expired permission request"))
