@@ -102,7 +102,7 @@ async def main() -> None:
                 print("Allow? [y/N] ", end="", flush=True)
                 return
 
-            if event_type in ("run.status", "run.log", "run.error", "run.final", "run.token"):
+            if event_type in ("run.status", "run.log", "run.error", "run.final", "run.token", "run.tool_call", "run.tool_result"):
                 run_id = payload.get("runId", "")
                 if run_id and run_id not in runs:
                     runs[run_id] = RunBuffer(run_id=run_id)
@@ -123,6 +123,10 @@ async def main() -> None:
                         printer.done(run_id)
                 elif event_type == "run.token":
                     printer.token(run_id, payload.get("content", ""))
+                elif event_type == "run.tool_call":
+                    printer.log(run_id, f"tool_call: {payload.get('toolName','')} {payload.get('arguments',{})}")
+                elif event_type == "run.tool_result":
+                    printer.log(run_id, f"tool_result: {payload.get('toolName','')} {payload.get('ok', True)}")
 
         async def handle_response(msg: dict):
             if msg.get("ok") is False:
@@ -168,4 +172,3 @@ async def main() -> None:
                     await send_run(line)
 
         await asyncio.gather(receiver(), sender())
-

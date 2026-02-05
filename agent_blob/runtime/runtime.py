@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import json
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Optional, List
 
 from agent_blob.protocol import EventType, create_event
 from agent_blob.policy.policy import Policy
@@ -14,6 +15,7 @@ from agent_blob.runtime.storage.scheduler import SchedulerStore
 from agent_blob.runtime.tools.filesystem import filesystem_read, filesystem_list
 from agent_blob.runtime.tools.shell import shell_run
 from agent_blob.runtime.llm import OpenAIChatCompletionsProvider
+from agent_blob.runtime.tools.registry import ToolDefinition, ToolRegistry
 
 
 AskPermission = Callable[..., Awaitable[str]]
@@ -33,6 +35,7 @@ class Runtime:
         self.tasks = TaskStore()
         self.schedules = SchedulerStore()
         self._llm = None
+        self.tools = ToolRegistry(self._default_tools())
 
     async def startup(self):
         await self.event_log.startup()
@@ -101,16 +104,19 @@ class Runtime:
             await self.memory.observe_turn(run_id=run_id, user_text=user_input, assistant_text=response_text)
         else:
             model = os.getenv("MODEL_NAME", "gpt-4o-mini")
-            messages = self._build_messages(user_input=user_input, pinned=pinned, related=related)
+            base_messages = self._build_messages(user_input=user_input, pinned=pinned, related=related)
 
-            yield create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "streaming"})
-            assistant_text = ""
+            if self._llm is None:
+                self._llm = OpenAIChatCompletionsProvider()
+
             try:
-                if self._llm is None:
-                    self._llm = OpenAIChatCompletionsProvider()
-                async for tok in self._llm.stream_chat(model=model, messages=messages):
-                    assistant_text += tok
-                    yield create_event(EventType.RUN_TOKEN, {"runId": run_id, "content": tok})
+                assistant_text = ""
+                async for ev in self._stream_agent_loop_with_tools(
+                    run_id=run_id, model=model, messages=base_messages, tool_ctx=tool_ctx
+                ):
+                    if ev.get("event") == EventType.RUN_TOKEN:
+                        assistant_text += (ev.get("payload") or {}).get("content", "")
+                    yield ev
             except Exception as e:
                 await self.event_log.append({"type": "run.error", "runId": run_id, "error": str(e)})
                 yield create_event(EventType.RUN_ERROR, {"runId": run_id, "message": str(e)})
@@ -134,6 +140,154 @@ class Runtime:
             msgs.append({"role": "system", "content": f"Potentially relevant past notes (may be partial): {related}"})
         msgs.append({"role": "user", "content": user_input})
         return msgs
+
+    def _default_tools(self) -> List[ToolDefinition]:
+        async def _fs_read(args: Dict[str, Any]) -> Any:
+            return await filesystem_read(str(args.get("path", "")))
+
+        async def _fs_list(args: Dict[str, Any]) -> Any:
+            return await filesystem_list(str(args.get("path", "")))
+
+        async def _shell_run(args: Dict[str, Any]) -> Any:
+            return await shell_run(str(args.get("command", "")))
+
+        return [
+            ToolDefinition(
+                name="filesystem_read",
+                capability="filesystem.read",
+                description="Read a text file within the allowed root.",
+                parameters={
+                    "type": "object",
+                    "properties": {"path": {"type": "string", "description": "Path to file"}},
+                    "required": ["path"],
+                },
+                executor=_fs_read,
+            ),
+            ToolDefinition(
+                name="filesystem_list",
+                capability="filesystem.list",
+                description="List a directory within the allowed root.",
+                parameters={
+                    "type": "object",
+                    "properties": {"path": {"type": "string", "description": "Path to directory"}},
+                    "required": ["path"],
+                },
+                executor=_fs_list,
+            ),
+            ToolDefinition(
+                name="shell_run",
+                capability="shell.run",
+                description="Run a shell command (requires permission).",
+                parameters={
+                    "type": "object",
+                    "properties": {"command": {"type": "string", "description": "Shell command to run"}},
+                    "required": ["command"],
+                },
+                executor=_shell_run,
+            ),
+        ]
+
+    async def _stream_agent_loop_with_tools(
+        self,
+        *,
+        run_id: str,
+        model: str,
+        messages: List[Dict[str, Any]],
+        tool_ctx: ToolContext,
+        max_rounds: int = 3,
+    ) -> AsyncIterator[dict]:
+        """
+        Streaming tool-calling loop. Caller can reconstruct assistant text by concatenating RUN_TOKEN payloads.
+        """
+        assert self._llm is not None
+        tools = self.tools.to_openai_tools()
+
+        for _round in range(max_rounds):
+            tool_calls_dict: Dict[int, Dict[str, Any]] = {}
+            assistant_delta_text = ""
+
+            yield create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "streaming"})
+            async for chunk in self._llm.stream_chat_chunks(model=model, messages=messages, tools=tools):
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = chunk.choices[0].delta
+                content = getattr(delta, "content", None)
+                if content:
+                    assistant_delta_text += content
+                    yield create_event(EventType.RUN_TOKEN, {"runId": run_id, "content": content})
+
+                if getattr(delta, "tool_calls", None):
+                    for tc_chunk in delta.tool_calls:
+                        idx = tc_chunk.index
+                        if idx not in tool_calls_dict:
+                            tool_calls_dict[idx] = {
+                                "id": None,
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            }
+                        if getattr(tc_chunk, "id", None):
+                            tool_calls_dict[idx]["id"] = tc_chunk.id
+                        fn = getattr(tc_chunk, "function", None)
+                        if fn:
+                            if getattr(fn, "name", None):
+                                tool_calls_dict[idx]["function"]["name"] += fn.name
+                            if getattr(fn, "arguments", None):
+                                tool_calls_dict[idx]["function"]["arguments"] += fn.arguments or ""
+
+            tool_calls = [tool_calls_dict[i] for i in sorted(tool_calls_dict.keys())]
+            if not tool_calls:
+                return
+
+            yield create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "executing_tools"})
+
+            # Assistant message that contains tool_calls (required for tool results to be accepted).
+            messages = messages + [{"role": "assistant", "content": assistant_delta_text or None, "tool_calls": tool_calls}]
+
+            tool_results_msgs: List[Dict[str, Any]] = []
+            for tc in tool_calls:
+                tool_call_id = tc.get("id") or f"tool_{run_id}"
+                tool_name = tc.get("function", {}).get("name", "")
+                raw_args = tc.get("function", {}).get("arguments", "") or ""
+
+                try:
+                    args = json.loads(raw_args) if raw_args else {}
+                except Exception:
+                    args = {}
+
+                try:
+                    tool_def = self.tools.get(tool_name)
+                except Exception:
+                    res = {"ok": False, "error": f"Unknown tool: {tool_name}"}
+                    yield create_event(
+                        EventType.RUN_TOOL_RESULT,
+                        {"runId": run_id, "toolName": tool_name, "ok": False, "result": res},
+                    )
+                    tool_results_msgs.append({"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(res)})
+                    continue
+
+                yield create_event(EventType.RUN_TOOL_CALL, {"runId": run_id, "toolName": tool_name, "arguments": args})
+
+                await self._enforce(
+                    tool_ctx,
+                    tool_def.capability,
+                    preview=json.dumps(args, ensure_ascii=False),
+                    reason=f"Tool call: {tool_def.capability}",
+                )
+
+                try:
+                    result = await tool_def.executor(args)
+                    res = {"ok": True, "result": result}
+                except Exception as e:
+                    res = {"ok": False, "error": str(e)}
+
+                yield create_event(EventType.RUN_TOOL_RESULT, {"runId": run_id, "toolName": tool_name, **res})
+                tool_results_msgs.append(
+                    {"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(res, ensure_ascii=False)}
+                )
+
+            messages = messages + tool_results_msgs
+
+        yield create_event(EventType.RUN_LOG, {"runId": run_id, "message": "Reached max tool-calling rounds."})
 
     async def _maybe_introspect(self, *, user_input: str) -> Optional[str]:
         q = (user_input or "").lower()

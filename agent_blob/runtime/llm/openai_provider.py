@@ -38,3 +38,22 @@ class OpenAIChatCompletionsProvider:
             if content:
                 yield content
 
+    async def stream_chat_chunks(
+        self,
+        *,
+        model: str,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Any]:
+        """
+        Yield raw OpenAI chunks (used for tool-calling accumulation).
+        """
+        stream = await self._client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=tools,
+            stream=True,
+            temperature=0.7,
+        )
+        async for chunk in stream:
+            yield chunk
