@@ -47,7 +47,7 @@ async def main() -> None:
     client_type = "cli"
 
     runs: Dict[str, RunBuffer] = {}
-    pending_permissions: Dict[str, str] = {}  # request_id -> run_id
+    pending_permissions: Dict[str, Dict[str, str]] = {}  # request_id -> {run_id, capability}
     pending_lock = asyncio.Lock()
     printer = Printer()
 
@@ -91,7 +91,10 @@ async def main() -> None:
                 request_id = payload.get("requestId", "")
                 run_id = payload.get("runId", "")
                 async with pending_lock:
-                    pending_permissions[request_id] = run_id
+                    pending_permissions[request_id] = {
+                        "run_id": str(run_id or ""),
+                        "capability": str(payload.get("capability", "") or ""),
+                    }
                 capability = payload.get("capability", "")
                 preview = payload.get("preview", "")
                 reason = payload.get("reason", "")
@@ -100,7 +103,7 @@ async def main() -> None:
                     print(f"  reason: {reason}")
                 if preview:
                     print(f"  preview: {preview}")
-                print("Allow? [y/N] ", end="", flush=True)
+                print("Allow? [y/N]: ", end="", flush=True)
                 return
 
             if event_type in ("run.status", "run.log", "run.error", "run.final", "run.token", "run.tool_call", "run.tool_result"):
@@ -154,8 +157,16 @@ async def main() -> None:
                 async with pending_lock:
                     pending = list(pending_permissions.items())
                 if pending:
-                    request_id, run_id = pending[0]
-                    decision = "allow" if line.lower() in ("y", "yes", "allow") else "deny"
+                    request_id, info = pending[0]
+                    run_id = str((info or {}).get("run_id", "") or "")
+                    capability = str((info or {}).get("capability", "") or "")
+                    raw = line.lower().strip()
+                    # Interactive approvals are per-action by default (no "always allow/deny").
+                    remember = False
+                    if raw in ("y", "yes", "allow"):
+                        decision = "allow"
+                    else:
+                        decision = "deny"
                     async with pending_lock:
                         pending_permissions.pop(request_id, None)
                     await ws.send(
@@ -164,7 +175,7 @@ async def main() -> None:
                                 "type": "req",
                                 "id": _new_id("perm"),
                                 "method": "permission.respond",
-                                "params": {"requestId": request_id, "decision": decision, "remember": False},
+                                "params": {"requestId": request_id, "decision": decision, "remember": bool(remember), "capability": capability},
                             }
                         )
                     )

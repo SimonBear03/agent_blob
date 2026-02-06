@@ -57,7 +57,7 @@ class SkillsConfig:
 
 
 def load_skills_config() -> SkillsConfig:
-    cfg = config.load_config()
+    cfg = config.load_config_uncached()
     skills = (cfg.get("skills") or {}) if isinstance(cfg, dict) else {}
     dirs = skills.get("dirs") if isinstance(skills, dict) else None
     enabled = skills.get("enabled") if isinstance(skills, dict) else None
@@ -71,13 +71,12 @@ def load_skills_config() -> SkillsConfig:
 
 class SkillsLoader:
     def __init__(self):
-        self.cfg = load_skills_config()
-        if not self.cfg.enabled:
-            self.cfg.enabled = config.skills_enabled()
+        pass
 
     def _skill_paths(self) -> List[Path]:
+        cfg = load_skills_config()
         out: List[Path] = []
-        for raw in self.cfg.dirs:
+        for raw in cfg.dirs:
             p = _expand(str(raw))
             if p.exists() and p.is_dir():
                 out.append(p)
@@ -120,18 +119,30 @@ class SkillsLoader:
 
     def get(self, name: str) -> Optional[Skill]:
         skills = self.discover()
-        return skills.get(name)
+        raw = str(name or "").strip()
+        if not raw:
+            return None
+        if raw in skills:
+            return skills.get(raw)
+        low = raw.lower()
+        matches = [k for k in skills.keys() if str(k).lower() == low]
+        if len(matches) == 1:
+            return skills.get(matches[0])
+        return None
 
     def enabled_blocks(self) -> List[str]:
+        cfg = load_skills_config()
+        if not cfg.enabled:
+            cfg.enabled = config.skills_enabled()
         skills = self.discover()
         blocks: List[str] = []
-        for n in self.cfg.enabled:
+        for n in cfg.enabled:
             s = skills.get(str(n))
             if not s:
                 continue
             blocks.append(f"# Skill: {s.name}\n\n{s.body}\n")
         # Apply a hard cap so enabled skills can't blow up the context.
-        cap = max(0, int(self.cfg.max_chars))
+        cap = max(0, int(cfg.max_chars))
         if cap and sum(len(b) for b in blocks) > cap:
             clipped: List[str] = []
             used = 0

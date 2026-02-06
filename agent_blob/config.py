@@ -16,6 +16,18 @@ def load_config(path: str = "agent_blob.json") -> Dict[str, Any]:
     except Exception:
         return {}
 
+def load_config_uncached(path: str = "agent_blob.json") -> Dict[str, Any]:
+    """
+    Uncached config read. Use this when changes must take effect without restarting.
+    """
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
 
 def _get(cfg: Dict[str, Any], *path: str, default: Any = None) -> Any:
     cur: Any = cfg
@@ -150,6 +162,15 @@ def tasks_auto_close_after_s() -> int:
         return int(_get(cfg, "tasks", "auto_close_after_s", default=21600))
     except Exception:
         return 21600
+
+
+def scheduler_timezone() -> Optional[str]:
+    cfg = load_config()
+    v = _get(cfg, "scheduler", "timezone", default=None)
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
 
 
 def _log_cfg(kind: str) -> Dict[str, Any]:

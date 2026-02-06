@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from agent_blob.config import load_config
+from agent_blob.config import load_config_uncached
+from agent_blob.runtime.mcp.http_client import MCPStreamableHttpClient
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,7 @@ class MCPClientManager:
         self._tools_cache: Dict[str, List[Dict[str, Any]]] = {}
 
     def _load_servers(self) -> List[MCPServerConfig]:
-        cfg = load_config()
+        cfg = load_config_uncached()
         mcp = (cfg.get("mcp") or {}) if isinstance(cfg, dict) else {}
         servers = mcp.get("servers") if isinstance(mcp, dict) else None
         out: List[MCPServerConfig] = []
@@ -41,7 +42,16 @@ class MCPClientManager:
                     out.append(MCPServerConfig(name=name, url=url, transport=transport))
         return out
 
+    def reload(self) -> None:
+        """
+        Reload server configuration from agent_blob.json.
+        """
+        self._servers = self._load_servers()
+        self._tools_cache = {}
+
     def list_servers(self) -> List[Dict[str, str]]:
+        # Keep server config fresh even if agent_blob.json changes while running.
+        self.reload()
         return [{"name": s.name, "url": s.url, "transport": s.transport} for s in self._servers]
 
     async def list_tools(self) -> List[Dict[str, Any]]:
@@ -51,7 +61,8 @@ class MCPClientManager:
         Returns a list of dict tool descriptions:
           {server, name, description, inputSchema}
         """
-        from agent_blob.runtime.mcp.http_client import MCPStreamableHttpClient
+        # Keep server config fresh even if agent_blob.json changes while running.
+        self.reload()
 
         out: List[Dict[str, Any]] = []
         for s in self._servers:
@@ -80,8 +91,8 @@ class MCPClientManager:
         return out
 
     async def call_tool(self, *, server: str, name: str, arguments: Dict[str, Any]) -> Any:
-        from agent_blob.runtime.mcp.http_client import MCPStreamableHttpClient
-
+        # Keep server config fresh even if agent_blob.json changes while running.
+        self.reload()
         cfg = {s.name: s for s in self._servers}
         s = cfg.get(server)
         if not s:
@@ -89,12 +100,51 @@ class MCPClientManager:
         if s.transport != "streamable-http":
             raise RuntimeError(f"Unsupported MCP transport: {s.transport}")
 
-        # Resolve tool name: prefer exact; else allow unique suffix matches like "add" -> "demo.add".
+        # Resolve tool name: prefer exact; else allow unique suffix matches like "add" -> "quant.add".
         resolved = await self._resolve_tool_name(server=server, name=name)
 
         client = MCPStreamableHttpClient(base_url=s.url)
         try:
             return await client.tools_call(name=resolved, arguments=arguments)
+        finally:
+            await client.close()
+
+    async def list_prompts(self) -> List[Dict[str, Any]]:
+        """
+        List prompts from configured MCP servers.
+
+        Returns items like:
+          {server, name, description, arguments?}
+        """
+        self.reload()
+        out: List[Dict[str, Any]] = []
+        for s in self._servers:
+            if s.transport != "streamable-http":
+                continue
+            client = MCPStreamableHttpClient(base_url=s.url)
+            try:
+                result = await client.prompts_list()
+                prompts = result.get("prompts") if isinstance(result, dict) else None
+                if isinstance(prompts, list):
+                    for p in prompts:
+                        if not isinstance(p, dict):
+                            continue
+                        out.append({"server": s.name, **p})
+            finally:
+                await client.close()
+        return out
+
+    async def get_prompt(self, *, server: str, name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
+        self.reload()
+        cfg = {s.name: s for s in self._servers}
+        s = cfg.get(server)
+        if not s:
+            raise RuntimeError(f"Unknown MCP server: {server}")
+        if s.transport != "streamable-http":
+            raise RuntimeError(f"Unsupported MCP transport: {s.transport}")
+        client = MCPStreamableHttpClient(base_url=s.url)
+        try:
+            return await client.prompts_get(name=name, arguments=arguments)
         finally:
             await client.close()
 
@@ -114,7 +164,7 @@ class MCPClientManager:
         if raw in names:
             return raw
 
-        # If no dot, try prefixing with server name (common for demo.*).
+        # If no dot, try prefixing with server name.
         if "." not in raw:
             pref = f"{server}.{raw}"
             if pref in names:

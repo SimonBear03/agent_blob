@@ -37,6 +37,57 @@ class Policy:
             deny=list(perm.get("deny") or []),
         )
 
+    @staticmethod
+    def persist_decision(*, capability: str, decision: str, path: str = "agent_blob.json") -> None:
+        """
+        Persist a permission decision into agent_blob.json.
+
+        We store exact capabilities (no pattern synthesis yet).
+        Precedence is always deny > ask > allow.
+        """
+        cap = str(capability or "").strip()
+        dec = str(decision or "").strip().lower()
+        if not cap or dec not in ("allow", "deny", "ask"):
+            return
+
+        p = Path(path)
+        if not p.exists():
+            data = {}
+        else:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+
+        perm = data.get("permissions")
+        if not isinstance(perm, dict):
+            perm = {}
+            data["permissions"] = perm
+
+        allow = list(perm.get("allow") or [])
+        ask = list(perm.get("ask") or [])
+        deny = list(perm.get("deny") or [])
+
+        # Remove from all lists first
+        allow = [x for x in allow if x != cap]
+        ask = [x for x in ask if x != cap]
+        deny = [x for x in deny if x != cap]
+
+        if dec == "allow":
+            allow.append(cap)
+        elif dec == "deny":
+            deny.append(cap)
+        else:
+            ask.append(cap)
+
+        perm["allow"] = allow
+        perm["ask"] = ask
+        perm["deny"] = deny
+
+        p.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
     def check(self, capability: str) -> PolicyDecision:
         # deny > ask > allow
         for pat in self.deny:
