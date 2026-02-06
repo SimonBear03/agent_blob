@@ -6,6 +6,7 @@ import json
 import time
 import difflib
 import re
+from uuid import uuid4
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Optional, List
 
@@ -19,7 +20,7 @@ from agent_blob.runtime.llm import OpenAIChatCompletionsProvider
 from agent_blob.runtime.tools.registry import ToolDefinition, ToolRegistry
 from agent_blob.runtime.memory import MemoryExtractor
 from agent_blob.runtime.capabilities.registry import CapabilityRegistry
-from agent_blob.runtime.providers import LocalProvider, SkillsProvider, MCPProvider
+from agent_blob.runtime.providers import LocalProvider, SkillsProvider, MCPProvider, WorkersProvider
 from agent_blob.runtime.tools.filesystem import filesystem_read_optional
 from agent_blob.config import (
     load_config,
@@ -47,14 +48,18 @@ class Runtime:
         self.tasks = TaskStore()
         self.schedules = SchedulerStore()
         self._llm = None
+        self._active_workers: Dict[str, Dict[str, Any]] = {}
         self.capabilities = CapabilityRegistry(
             providers=[
                 LocalProvider(memory=self.memory, schedules=self.schedules),
                 SkillsProvider(),
                 MCPProvider(),
+                WorkersProvider(),
             ]
         )
-        self.tools = ToolRegistry(self.capabilities.tools())
+        tool_defs = self.capabilities.tools()
+        self._tool_defs_by_name = {t.name: t for t in tool_defs}
+        self.tools = ToolRegistry(tool_defs)
         self.memory_extractor = MemoryExtractor()
 
     async def startup(self):
@@ -127,9 +132,29 @@ class Runtime:
         policy: Policy,
         ask_permission: AskPermission,
     ) -> AsyncIterator[dict]:
-        task_id = await self._route_task(run_id=run_id, user_input=user_input)
+        raw_input = str(user_input or "")
+        scheduled_id = None
+        m = re.match(r"^\[scheduled:([^\]]+)\]\s*(.*)$", raw_input.strip(), flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            scheduled_id = m.group(1).strip()
+            # Strip the scheduled prefix for the LLM/user-visible intent.
+            user_input = m.group(2).strip()
+
+        if scheduled_id:
+            task_id = await self.tasks.ensure_task(task_id=f"task_sched_{scheduled_id}", title=f"scheduled:{scheduled_id}")
+            await self.tasks.attach_run(task_id=task_id, run_id=run_id)
+        else:
+            task_id = await self._route_task(run_id=run_id, user_input=user_input)
         await self.tasks.set_status(task_id=task_id, status="running")
-        await self.event_log.append({"type": "run.input", "runId": run_id, "taskId": task_id, "input": user_input})
+        await self.event_log.append(
+            {
+                "type": "run.input",
+                "runId": run_id,
+                "taskId": task_id,
+                "input": user_input,
+                "source": {"kind": "schedule", "id": scheduled_id} if scheduled_id else {"kind": "user"},
+            }
+        )
 
         # Explicit memory requests should never be "solved" by writing to repo files or running tools.
         remembered = self._parse_explicit_remember(user_input)
@@ -195,6 +220,7 @@ class Runtime:
             related=related,
             structured=structured,
             recent_turns=recent_turns,
+            scheduled_id=scheduled_id,
         )
 
         if self._llm is None:
@@ -235,6 +261,7 @@ class Runtime:
         related: list[dict],
         structured: list[dict],
         recent_turns: list[dict],
+        scheduled_id: str | None = None,
     ) -> list[dict]:
         system = (
             "You are Agent Blob, a helpful always-on master AI. Be concise and actionable.\n"
@@ -244,6 +271,8 @@ class Runtime:
             "Use filesystem_write primarily for creating new files or full overwrites; use edit_apply_patch for modifying existing files.\n"
             "For scheduling background jobs, use schedule_create_interval, schedule_list, and schedule_delete.\n"
             "For wall-clock schedules, prefer schedule_create_daily or schedule_create_cron (cron uses min hour dom mon dow) and include an IANA timezone when possible.\n"
+            "To pause/resume a schedule, use schedule_update (enabled=true/false).\n"
+            "For multitasking, you may delegate to specialized workers via worker_run (briefing/quant/dev) and then report the result to the user.\n"
             "Do NOT use shell_run to modify files (e.g. '>', '>>', 'tee', 'sed -i'). Use filesystem_write or edit_apply_patch.\n"
             "Only use tools when necessary to complete a user-requested task."
         )
@@ -251,6 +280,18 @@ class Runtime:
         if cap_instructions:
             system = system + "\n\n" + cap_instructions.strip()
         msgs: list[dict] = [{"role": "system", "content": system}]
+        if scheduled_id:
+            msgs.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"This message was triggered by a schedule (id={scheduled_id}).\n"
+                        "Execute the scheduled prompt now.\n"
+                        "Do not suggest \"I can help you set up a schedule\"—the schedule already exists.\n"
+                        "If the prompt requires tools (shell/filesystem/MCP), call the appropriate tools."
+                    ),
+                }
+            )
         if pinned:
             msgs.append({"role": "system", "content": f"Pinned memory (authoritative): {pinned}"})
         if structured:
@@ -430,8 +471,11 @@ class Runtime:
                 )
 
                 try:
-                    result = await tool_def.executor(args)
-                    res = {"ok": True, "result": result}
+                    if tool_def.name == "worker_run":
+                        res = await self._execute_worker_run(args=args, tool_ctx=tool_ctx)
+                    else:
+                        result = await tool_def.executor(args)
+                        res = {"ok": True, "result": result}
                 except Exception as e:
                     res = {"ok": False, "error": str(e)}
 
@@ -443,6 +487,215 @@ class Runtime:
             messages = messages + tool_results_msgs
 
         yield create_event(EventType.RUN_LOG, {"runId": run_id, "message": "Reached max tool-calling rounds."})
+
+    async def _execute_worker_run(self, *, args: Dict[str, Any], tool_ctx: ToolContext) -> Dict[str, Any]:
+        worker_type = str(args.get("worker_type", "") or "").strip().lower()
+        prompt = str(args.get("prompt", "") or "").strip()
+        max_rounds = int(args.get("max_rounds", 3) or 3)
+        if not worker_type or not prompt:
+            return {"ok": False, "error": "worker_type and prompt are required"}
+
+        worker_run_id = f"run_worker_{uuid4().hex[:10]}"
+        self._active_workers[worker_run_id] = {
+            "workerRunId": worker_run_id,
+            "workerType": worker_type,
+            "parentRunId": tool_ctx.run_id,
+            "started_at": time.time(),
+            "status": "running",
+        }
+        await self.event_log.append(
+            {
+                "type": "worker.spawn",
+                "runId": tool_ctx.run_id,
+                "workerRunId": worker_run_id,
+                "workerType": worker_type,
+            }
+        )
+
+        # Bubble permissions to the user under the worker run id.
+        wctx = ToolContext(run_id=worker_run_id, policy=tool_ctx.policy, ask_permission=tool_ctx.ask_permission)
+
+        # Pick tool subset by worker type.
+        if worker_type == "briefing":
+            allowed = {"web_fetch"}
+            system = (
+                "You are a briefing worker. Execute the user's prompt by gathering information if needed and returning a concise result.\n"
+                "You may use web_fetch when necessary. Be concise.\n"
+            )
+        elif worker_type == "quant":
+            allowed = {"mcp_list_servers", "mcp_list_tools", "mcp_refresh", "mcp_call", "mcp_list_prompts", "mcp_get_prompt"}
+            system = (
+                "You are a quant worker. Execute the user's prompt by calling MCP tools as needed and returning a concise result.\n"
+                "Prefer querying state (positions/risk) over making changes.\n"
+            )
+        elif worker_type == "dev":
+            allowed = {"fs_glob", "fs_grep", "filesystem_read", "edit_apply_patch", "filesystem_write"}
+            system = (
+                "You are a dev worker. Execute the user's prompt using filesystem search/read and patch-based edits.\n"
+                "Prefer edit_apply_patch for modifications.\n"
+            )
+        else:
+            return {"ok": False, "error": f"Unknown worker_type: {worker_type}"}
+
+        tool_defs = []
+        for name in sorted(allowed):
+            t = self._tool_defs_by_name.get(name)
+            if t:
+                tool_defs.append(t)
+
+        worker_tools = ToolRegistry(tool_defs)
+        worker_messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+
+        if self._llm is None:
+            self._llm = OpenAIChatCompletionsProvider()
+        model = llm_model_name()
+
+        out_text = await self._run_agent_loop_collect_text(
+            run_id=worker_run_id,
+            model=model,
+            messages=worker_messages,
+            tool_ctx=wctx,
+            tools_registry=worker_tools,
+            max_rounds=max(1, min(10, max_rounds)),
+        )
+        await self.event_log.append(
+            {
+                "type": "worker.done",
+                "runId": tool_ctx.run_id,
+                "workerRunId": worker_run_id,
+                "workerType": worker_type,
+            }
+        )
+        if worker_run_id in self._active_workers:
+            self._active_workers[worker_run_id]["status"] = "done"
+            self._active_workers[worker_run_id]["finished_at"] = time.time()
+            self._active_workers[worker_run_id]["output_len"] = len(out_text or "")
+            # Keep it for a short time for introspection, but don't grow unbounded.
+            # Simple cap: keep most recent 50 records (running or done).
+            if len(self._active_workers) > 50:
+                # Drop oldest finished workers first.
+                finished = [
+                    (float(v.get("finished_at", 0) or 0), k)
+                    for k, v in self._active_workers.items()
+                    if isinstance(v, dict) and v.get("status") == "done"
+                ]
+                finished.sort()
+                for _, k in finished[: max(0, len(self._active_workers) - 50)]:
+                    self._active_workers.pop(k, None)
+        return {"ok": True, "result": {"workerRunId": worker_run_id, "workerType": worker_type, "output": out_text}}
+
+    async def _run_agent_loop_collect_text(
+        self,
+        *,
+        run_id: str,
+        model: str,
+        messages: List[Dict[str, Any]],
+        tool_ctx: ToolContext,
+        tools_registry: ToolRegistry,
+        max_rounds: int,
+    ) -> str:
+        """
+        Run a tool-calling loop but collect the assistant output as text (no streaming events).
+        Used for worker delegation.
+        """
+        assert self._llm is not None
+        tools = tools_registry.to_openai_tools()
+        final_text = ""
+
+        for _round in range(max_rounds):
+            tool_calls_dict: Dict[int, Dict[str, Any]] = {}
+            assistant_delta_text = ""
+            async for chunk in self._llm.stream_chat_chunks(model=model, messages=messages, tools=tools):
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = chunk.choices[0].delta
+                content = getattr(delta, "content", None)
+                if content:
+                    assistant_delta_text += content
+                if getattr(delta, "tool_calls", None):
+                    for tc_chunk in delta.tool_calls:
+                        idx = tc_chunk.index
+                        if idx not in tool_calls_dict:
+                            tool_calls_dict[idx] = {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
+                        if getattr(tc_chunk, "id", None):
+                            tool_calls_dict[idx]["id"] = tc_chunk.id
+                        fn = getattr(tc_chunk, "function", None)
+                        if fn:
+                            if getattr(fn, "name", None):
+                                tool_calls_dict[idx]["function"]["name"] += fn.name
+                            if getattr(fn, "arguments", None):
+                                tool_calls_dict[idx]["function"]["arguments"] += fn.arguments or ""
+
+            tool_calls = [tool_calls_dict[i] for i in sorted(tool_calls_dict.keys())]
+            final_text = assistant_delta_text.strip() or final_text
+            if not tool_calls:
+                return final_text
+
+            # Append assistant tool_calls message
+            messages = messages + [{"role": "assistant", "content": assistant_delta_text or None, "tool_calls": tool_calls}]
+
+            tool_results_msgs: List[Dict[str, Any]] = []
+            for tc in tool_calls:
+                tool_call_id = tc.get("id") or f"tool_{run_id}"
+                tool_name = tc.get("function", {}).get("name", "")
+                raw_args = tc.get("function", {}).get("arguments", "") or ""
+                try:
+                    args = json.loads(raw_args) if raw_args else {}
+                except Exception:
+                    args = {}
+
+                # Disallow nested delegation for now.
+                if tool_name == "worker_run":
+                    res = {"ok": False, "error": "Nested worker_run is not supported"}
+                    tool_results_msgs.append({"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(res)})
+                    continue
+
+                try:
+                    tool_def = tools_registry.get(tool_name)
+                except Exception:
+                    res = {"ok": False, "error": f"Unknown worker tool: {tool_name}"}
+                    tool_results_msgs.append({"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(res)})
+                    continue
+
+                required = []
+                try:
+                    required = list((tool_def.parameters or {}).get("required") or [])
+                except Exception:
+                    required = []
+                missing = [k for k in required if k not in args]
+                if missing:
+                    res = {"ok": False, "error": f"Missing required arguments: {missing}", "missing": missing}
+                    tool_results_msgs.append({"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(res)})
+                    continue
+
+                preview = json.dumps(args, ensure_ascii=False)
+                if tool_def.capability == "filesystem.write":
+                    if tool_def.name == "edit_apply_patch":
+                        preview = await self._preview_edit_apply_patch(args)
+                    else:
+                        preview = await self._preview_filesystem_write(args)
+
+                effective_capability = tool_def.capability
+                if tool_def.capability == "shell.run":
+                    cmd = str(args.get("command", "") or "")
+                    if self._shell_command_writes_files(cmd):
+                        effective_capability = "shell.write"
+
+                await self._enforce(tool_ctx, effective_capability, preview=preview, reason=f"Worker tool call: {effective_capability}")
+
+                try:
+                    result = await tool_def.executor(args)
+                    res = {"ok": True, "result": result}
+                except Exception as e:
+                    res = {"ok": False, "error": str(e)}
+
+                tool_results_msgs.append(
+                    {"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(res, ensure_ascii=False)}
+                )
+
+            messages = messages + tool_results_msgs
+
+        return final_text
 
     def _shell_command_writes_files(self, command: str) -> bool:
         """
@@ -569,8 +822,40 @@ class Runtime:
                 "show memories",
             ]
         )
+        wants_memory_query = any(
+            p in q
+            for p in [
+                "do you remember",
+                "did you remember",
+                "did we decide",
+                "what did we decide",
+                "what did we agree",
+                "what did we agree on",
+                "what did we say about",
+                "do you recall",
+                "did we talk about",
+            ]
+        )
+        wants_workers = any(
+            p in q
+            for p in [
+                "workers active",
+                "any workers",
+                "any worker",
+                "running workers",
+                "active workers",
+                "sub agent",
+                "sub-agent",
+                "subagent",
+                "sub agents",
+                "delegated",
+                "delegation",
+                "child run",
+                "worker run",
+            ]
+        )
 
-        if not (wants_tasks or wants_schedule or wants_memory):
+        if not (wants_tasks or wants_schedule or wants_memory or wants_memory_query or wants_workers):
             return None
 
         out = []
@@ -615,6 +900,32 @@ class Runtime:
                 if isinstance(m, dict):
                     out.append(f"- ({m.get('type')}) {m.get('content')}")
             if not recent:
+                out.append("- (none)")
+
+        if wants_memory_query and not wants_memory:
+            # For recall questions, actually search long-term memory (not just "recent").
+            try:
+                if self._llm is None and os.getenv("OPENAI_API_KEY"):
+                    self._llm = OpenAIChatCompletionsProvider()
+                results = await self.memory.search_structured_hybrid(query=user_input, limit=10, llm=self._llm)
+            except Exception:
+                results = await self.memory.search_structured(user_input, limit=10)
+            out.append("Memory search results:")
+            if results:
+                for m in results[:10]:
+                    if isinstance(m, dict):
+                        out.append(f"- ({m.get('type')}) {m.get('content')}")
+            else:
+                out.append("- (no matches)")
+                out.append("Tip: try a couple more keywords (project name, module name, date).")
+
+        if wants_workers:
+            rows = list(self._active_workers.values())
+            running = [r for r in rows if isinstance(r, dict) and r.get("status") == "running"]
+            out.append(f"Active workers: {len(running)}")
+            for r in running[:10]:
+                out.append(f"- {r.get('workerRunId')}: {r.get('workerType')} (parent={r.get('parentRunId')})")
+            if not running:
                 out.append("- (none)")
 
         return "\n".join(out) + "\n"

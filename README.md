@@ -108,6 +108,7 @@ Runtime tools:
 - `schedule_create_interval` (capability `schedules.write`, prompts by default)
 - `schedule_create_daily` (capability `schedules.write`, prompts by default)
 - `schedule_create_cron` (capability `schedules.write`, prompts by default)
+- `schedule_update` (capability `schedules.write`, prompts by default)
 - `schedule_delete` (capability `schedules.write`, prompts by default)
 
 Example prompt to the agent:
@@ -213,3 +214,16 @@ Bundled example skills live under `agent_blob/runtime/skills/examples/`. Your ow
    - Ask: “List schedules” (should show the new schedule).
    - Ask: “Every day at 7:30 AM, remind me to check positions.”
    - Approve the schedule write prompt, then “List schedules” and confirm a `type: cron` schedule exists.
+   - Ask: “Disable the schedule you just created.”
+   - Approve the schedule write prompt, then “List schedules” and confirm it shows `enabled: false`.
+   - Ask: “Every 10 seconds, run `echo hi` in the shell.”
+   - Confirm scheduled runs consistently call `shell_run` (they should not respond “I can’t run shell commands”).
+   - (Offline-safe) Stop the CLI, keep gateway running, create a schedule that tries a permissioned action (e.g. “Every 10 seconds, run `echo hi` in the shell”). Wait for it to trigger.
+   - Reconnect with the CLI and confirm you receive the queued permission prompt.
+
+7) **Workers (delegation)**
+   - Ask: “Use a briefing worker to summarize the home page of https://example.com”
+   - Approve `workers.run` then approve `web.fetch` when prompted.
+   - Confirm the final answer includes the worker result and you saw tool calls under a `run_worker_*` run id.
+   - Ask: “Any workers active right now?”
+   - Confirm it reports active workers (or none).

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from datetime import datetime, timedelta
+import re
 from zoneinfo import ZoneInfo
 
 from .paths import data_dir
@@ -29,6 +30,11 @@ class SchedulerStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         if not self._path.exists():
             self._path.write_text("[]", encoding="utf-8")
+        # One-time migrate on startup so existing schedules get normalized.
+        items = self._load()
+        migrated, changed = self._migrate(items)
+        if changed:
+            self._save(migrated)
 
     def _load(self) -> list[dict]:
         try:
@@ -42,9 +48,59 @@ class SchedulerStore:
         tmp.replace(self._path)
 
     async def list_schedules(self) -> list[dict]:
-        items = self._load()
+        items, _ = self._migrate(self._load())
         items.sort(key=lambda x: float(x.get("next_run_at", 0)), reverse=False)
         return items
+
+    def _migrate(self, items: list[dict]) -> tuple[list[dict], bool]:
+        """
+        Normalize schedules to an OpenClaw-like typed shape:
+          {id, type, title, enabled, schedule:{...}, payload:{kind,text}, next_run_at, ...}
+        """
+        changed = False
+        out: list[dict] = []
+        for s in items:
+            if not isinstance(s, dict):
+                changed = True
+                continue
+            if "payload" in s and isinstance(s.get("payload"), dict) and "schedule" in s and isinstance(s.get("schedule"), dict):
+                out.append(s)
+                continue
+
+            # Legacy format migration.
+            stype = str(s.get("type", "") or "")
+            sid = str(s.get("id", "") or "").strip() or f"sched_{int(time.time()*1000)}"
+            prompt = str(s.get("input", "") or "")
+            prompt = self._sanitize_input(prompt)
+            title = str(s.get("title", "") or "").strip()[:120] or (prompt.strip()[:120] if prompt else sid)
+            enabled = bool(s.get("enabled", True))
+            tz = s.get("tz")
+
+            schedule: dict = {}
+            if stype == "interval":
+                schedule = {"interval_s": int(s.get("interval_s", 60) or 60)}
+            elif stype == "cron":
+                schedule = {"cron": str(s.get("cron", "") or "").strip()}
+            else:
+                schedule = {}
+
+            rec = {
+                "id": sid,
+                "type": stype or "interval",
+                "title": title,
+                "enabled": enabled,
+                "schedule": schedule,
+                "payload": {"kind": "prompt", "text": prompt},
+                "tz": str(tz).strip() if tz else None,
+                "created_at": float(s.get("created_at", time.time()) or time.time()),
+                "updated_at": float(s.get("updated_at", time.time()) or time.time()),
+                "next_run_at": float(s.get("next_run_at", 0) or 0),
+                "last_run_at": s.get("last_run_at"),
+                "last_run_id": s.get("last_run_id"),
+            }
+            out.append(rec)
+            changed = True
+        return out, changed
 
     async def create_interval(
         self,
@@ -54,26 +110,55 @@ class SchedulerStore:
         enabled: bool = True,
         title: Optional[str] = None,
     ) -> dict:
-        items = self._load()
+        items, _ = self._migrate(self._load())
         now = time.time()
         interval_s = max(1, int(interval_s))
         sched_id = f"sched_{int(now*1000)}"
+        input_text = self._sanitize_input(str(input or ""))
         rec = {
             "id": sched_id,
             "type": "interval",
-            "title": (title or input or "").strip()[:120],
-            "input": str(input or ""),
-            "interval_s": interval_s,
+            "title": (title or input_text or "").strip()[:120],
             "enabled": bool(enabled),
             "created_at": now,
             "updated_at": now,
             "next_run_at": now + interval_s,
             "last_run_at": None,
             "last_run_id": None,
+            "schedule": {"interval_s": interval_s},
+            "payload": {"kind": "prompt", "text": input_text},
+            "tz": None,
         }
         items.append(rec)
         self._save(items)
         return rec
+
+    def _sanitize_input(self, text: str) -> str:
+        """
+        Schedules should store user-like instructions, not pseudo tool calls.
+        The LLM sometimes passes strings like shell_run({...}) which won't execute.
+        Rewrite a small set of common tool-like patterns into natural language.
+        """
+        s = (text or "").strip()
+        if not s:
+            return ""
+
+        low = s.lower()
+
+        # shell_run('echo hi')
+        m = re.search(r"shell_run\s*\(\s*['\"]([^'\"]+)['\"]\s*\)\s*$", s, flags=re.IGNORECASE)
+        if m:
+            cmd = m.group(1).strip()
+            return f"Run `{cmd}` in the shell."
+
+        # shell_run({'command': 'echo hi'}) or shell_run({"command":"echo hi"})
+        if "shell_run" in low and "command" in low:
+            m2 = re.search(r"command['\"]?\s*:\s*['\"]([^'\"]+)['\"]", s, flags=re.IGNORECASE)
+            if m2:
+                cmd = m2.group(1).strip()
+                return f"Run `{cmd}` in the shell."
+
+        return s
 
     def _tzinfo(self, tz_name: Optional[str]):
         if tz_name:
@@ -162,23 +247,24 @@ class SchedulerStore:
         enabled: bool = True,
         title: Optional[str] = None,
     ) -> dict:
-        items = self._load()
+        items, _ = self._migrate(self._load())
         now = time.time()
         sched_id = f"sched_{int(now*1000)}"
         next_run_at = self._next_cron_run_at(expr=cron, tz_name=tz, now=now)
+        input_text = self._sanitize_input(str(input or ""))
         rec = {
             "id": sched_id,
             "type": "cron",
-            "title": (title or input or "").strip()[:120],
-            "input": str(input or ""),
-            "cron": str(cron or "").strip(),
-            "tz": str(tz).strip() if tz else None,
+            "title": (title or input_text or "").strip()[:120],
             "enabled": bool(enabled),
             "created_at": now,
             "updated_at": now,
             "next_run_at": next_run_at,
             "last_run_at": None,
             "last_run_id": None,
+            "schedule": {"cron": str(cron or "").strip()},
+            "payload": {"kind": "prompt", "text": input_text},
+            "tz": str(tz).strip() if tz else None,
         }
         items.append(rec)
         self._save(items)
@@ -203,7 +289,7 @@ class SchedulerStore:
 
     async def delete(self, *, schedule_id: str) -> dict:
         sid = str(schedule_id or "").strip()
-        items = self._load()
+        items, _ = self._migrate(self._load())
         before = len(items)
         items = [s for s in items if str(s.get("id", "")) != sid]
         removed = before - len(items)
@@ -211,11 +297,31 @@ class SchedulerStore:
             self._save(items)
         return {"ok": bool(removed), "removed": removed, "id": sid}
 
+    async def set_enabled(self, *, schedule_id: str, enabled: bool) -> dict:
+        sid = str(schedule_id or "").strip()
+        if not sid:
+            return {"ok": False, "error": "Missing schedule id"}
+        items, _ = self._migrate(self._load())
+        changed = False
+        for s in items:
+            if not isinstance(s, dict):
+                continue
+            if str(s.get("id", "")) != sid:
+                continue
+            s["enabled"] = bool(enabled)
+            s["updated_at"] = time.time()
+            changed = True
+            break
+        if changed:
+            self._save(items)
+            return {"ok": True, "id": sid, "enabled": bool(enabled)}
+        return {"ok": False, "error": "Schedule not found", "id": sid}
+
     async def pop_due(self, *, now: Optional[float] = None) -> list[dict]:
         """
         Return schedules due to run, and advance their next_run_at.
         """
-        items = self._load()
+        items, _ = self._migrate(self._load())
         t = float(now if now is not None else time.time())
         due: list[dict] = []
         changed = False
@@ -228,11 +334,13 @@ class SchedulerStore:
             if next_run <= t:
                 due.append(dict(s))
                 s["last_run_at"] = t
-                if str(s.get("type", "")) == "interval":
-                    interval_s = max(1, int(s.get("interval_s", 60) or 60))
+                stype = str(s.get("type", "") or "")
+                sched = s.get("schedule") if isinstance(s.get("schedule"), dict) else {}
+                if stype == "interval":
+                    interval_s = max(1, int((sched or {}).get("interval_s", 60) or 60))
                     s["next_run_at"] = t + interval_s
-                elif str(s.get("type", "")) == "cron":
-                    expr = str(s.get("cron", "") or "")
+                elif stype == "cron":
+                    expr = str((sched or {}).get("cron", "") or "")
                     tz_name = s.get("tz")
                     s["next_run_at"] = self._next_cron_run_at(expr=expr, tz_name=str(tz_name) if tz_name else None, now=t)
                 else:
@@ -251,7 +359,7 @@ class SchedulerStore:
         rid = str(run_id or "").strip()
         if not sid or not rid:
             return False
-        items = self._load()
+        items, _ = self._migrate(self._load())
         changed = False
         for s in items:
             if not isinstance(s, dict):

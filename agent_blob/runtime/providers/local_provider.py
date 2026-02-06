@@ -72,8 +72,13 @@ class LocalProvider:
 
         async def _schedule_create_interval(args: Dict[str, Any]) -> Any:
             await self.schedules.startup()
+            prompt = args.get("prompt")
+            if prompt is None:
+                prompt = args.get("input", "")
+            if not str(prompt or "").strip():
+                return {"ok": False, "error": "Missing prompt (what should the agent do when the schedule runs?)"}
             rec = await self.schedules.create_interval(
-                input=str(args.get("input", "") or ""),
+                input=str(prompt or ""),
                 interval_s=int(args.get("interval_s", 60) or 60),
                 enabled=bool(args.get("enabled", True)),
                 title=str(args.get("title", "") or "") or None,
@@ -82,8 +87,13 @@ class LocalProvider:
 
         async def _schedule_create_daily(args: Dict[str, Any]) -> Any:
             await self.schedules.startup()
+            prompt = args.get("prompt")
+            if prompt is None:
+                prompt = args.get("input", "")
+            if not str(prompt or "").strip():
+                return {"ok": False, "error": "Missing prompt (what should the agent do when the schedule runs?)"}
             rec = await self.schedules.create_daily(
-                input=str(args.get("input", "") or ""),
+                input=str(prompt or ""),
                 hour=int(args.get("hour", 7) or 7),
                 minute=int(args.get("minute", 30) or 30),
                 tz=(str(args.get("tz")).strip() if args.get("tz") is not None else None),
@@ -94,8 +104,13 @@ class LocalProvider:
 
         async def _schedule_create_cron(args: Dict[str, Any]) -> Any:
             await self.schedules.startup()
+            prompt = args.get("prompt")
+            if prompt is None:
+                prompt = args.get("input", "")
+            if not str(prompt or "").strip():
+                return {"ok": False, "error": "Missing prompt (what should the agent do when the schedule runs?)"}
             rec = await self.schedules.create_cron(
-                input=str(args.get("input", "") or ""),
+                input=str(prompt or ""),
                 cron=str(args.get("cron", "") or ""),
                 tz=(str(args.get("tz")).strip() if args.get("tz") is not None else None),
                 enabled=bool(args.get("enabled", True)),
@@ -106,6 +121,13 @@ class LocalProvider:
         async def _schedule_delete(args: Dict[str, Any]) -> Any:
             await self.schedules.startup()
             return await self.schedules.delete(schedule_id=str(args.get("id", "") or ""))
+
+        async def _schedule_set_enabled(args: Dict[str, Any]) -> Any:
+            await self.schedules.startup()
+            return await self.schedules.set_enabled(
+                schedule_id=str(args.get("id", "") or ""),
+                enabled=bool(args.get("enabled", True)),
+            )
 
         memory_search, memory_list_recent, memory_delete = build_memory_tools(self.memory)
 
@@ -233,12 +255,13 @@ class LocalProvider:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "input": {"type": "string", "description": "What the agent should do when the schedule runs"},
+                        "prompt": {"type": "string", "description": "What the agent should do when the schedule runs"},
+                        "input": {"type": "string", "description": "(Deprecated) alias for prompt"},
                         "interval_s": {"type": "integer", "description": "Interval in seconds", "default": 3600},
                         "enabled": {"type": "boolean", "description": "Whether the schedule is active", "default": True},
                         "title": {"type": "string", "description": "Optional short title"},
                     },
-                    "required": ["input", "interval_s"],
+                    "required": ["interval_s"],
                 },
                 executor=_schedule_create_interval,
             ),
@@ -249,14 +272,15 @@ class LocalProvider:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "input": {"type": "string", "description": "What the agent should do when the schedule runs"},
+                        "prompt": {"type": "string", "description": "What the agent should do when the schedule runs"},
+                        "input": {"type": "string", "description": "(Deprecated) alias for prompt"},
                         "hour": {"type": "integer", "description": "Hour (0-23)"},
                         "minute": {"type": "integer", "description": "Minute (0-59)"},
                         "tz": {"type": "string", "description": "IANA timezone, e.g. America/Los_Angeles (optional)"},
                         "enabled": {"type": "boolean", "description": "Whether the schedule is active", "default": True},
                         "title": {"type": "string", "description": "Optional short title"},
                     },
-                    "required": ["input", "hour", "minute"],
+                    "required": ["hour", "minute"],
                 },
                 executor=_schedule_create_daily,
             ),
@@ -267,13 +291,14 @@ class LocalProvider:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "input": {"type": "string", "description": "What the agent should do when the schedule runs"},
+                        "prompt": {"type": "string", "description": "What the agent should do when the schedule runs"},
+                        "input": {"type": "string", "description": "(Deprecated) alias for prompt"},
                         "cron": {"type": "string", "description": "Cron expression: min hour dom mon dow"},
                         "tz": {"type": "string", "description": "IANA timezone, e.g. America/New_York (optional)"},
                         "enabled": {"type": "boolean", "description": "Whether the schedule is active", "default": True},
                         "title": {"type": "string", "description": "Optional short title"},
                     },
-                    "required": ["input", "cron"],
+                    "required": ["cron"],
                 },
                 executor=_schedule_create_cron,
             ),
@@ -287,6 +312,20 @@ class LocalProvider:
                     "required": ["id"],
                 },
                 executor=_schedule_delete,
+            ),
+            ToolDefinition(
+                name="schedule_update",
+                capability="schedules.write",
+                description="Update a schedule (enable/disable).",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Schedule id"},
+                        "enabled": {"type": "boolean", "description": "Whether the schedule is enabled"},
+                    },
+                    "required": ["id", "enabled"],
+                },
+                executor=_schedule_set_enabled,
             ),
             ToolDefinition(
                 name="memory_search",

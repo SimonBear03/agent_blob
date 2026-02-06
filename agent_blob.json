@@ -89,7 +89,8 @@
       "web.fetch",
       "shell.run",
       "shell.write",
-      "schedules.write"
+      "schedules.write",
+      "workers.run"
     ],
     "allow": [
       "filesystem.read",

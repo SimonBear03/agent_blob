@@ -38,6 +38,37 @@ class TaskStore:
     def _save(self, data: dict) -> None:
         self._tasks.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    async def ensure_task(self, *, task_id: str, title: str) -> str:
+        """
+        Ensure a task with a specific id exists (used for stable, system-owned contexts like schedules).
+        Returns task_id.
+        """
+        tid = str(task_id or "").strip()
+        if not tid:
+            raise ValueError("Missing task_id")
+        data = self._load()
+        now = time.time()
+        if tid not in data or not isinstance(data.get(tid), dict):
+            data[tid] = {
+                "id": tid,
+                "status": "open",
+                "title": (title or "").strip()[:120],
+                "created_at": now,
+                "updated_at": now,
+                "run_ids": [],
+            }
+            self._append_event({"type": "task.created", "taskId": tid, "runId": None, "system": True})
+        else:
+            # Update title if it's empty and we have a better one.
+            t = data[tid]
+            if isinstance(t, dict):
+                if not str(t.get("title") or "").strip() and (title or "").strip():
+                    t["title"] = (title or "").strip()[:120]
+                    t["updated_at"] = now
+                    data[tid] = t
+        self._save(data)
+        return tid
+
     async def create_task(self, *, run_id: str, title: str) -> str:
         data = self._load()
         task_id = f"task_{int(time.time()*1000)}"

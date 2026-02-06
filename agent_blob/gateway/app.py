@@ -34,6 +34,9 @@ class Gateway:
         self.runtime = Runtime()
         self.policy = Policy.load()
         self._permission_waiters: Dict[str, asyncio.Future[str]] = {}
+        # Offline-safe permission requests (primarily for scheduled/background runs).
+        # request_id -> {"runId": str, "event": dict}
+        self._pending_permission_events: Dict[str, Dict[str, Any]] = {}
         self._seq = 0
         self._supervisor_task: asyncio.Task | None = None
 
@@ -48,7 +51,12 @@ class Gateway:
     async def _send_event(self, websocket: WebSocket, event: dict):
         if event.get("type") == "event" and event.get("seq") is None:
             event["seq"] = self._next_seq()
-        await websocket.send_json(event)
+        try:
+            await websocket.send_json(event)
+        except Exception as e:
+            # Client likely disconnected; ensure we stop treating it as active.
+            self.clients.pop(websocket, None)
+            raise ConnectionError("WebSocket send failed") from e
 
     async def _broadcast_event(self, event: dict):
         for ws in list(self.clients.keys()):
@@ -72,22 +80,25 @@ class Gateway:
         request_id = f"perm_{uuid4().hex[:12]}"
         fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self._permission_waiters[request_id] = fut
-        await self._broadcast_event(
-            create_event(
-                EventType.PERMISSION_REQUEST,
-                {
-                    "requestId": request_id,
-                    "runId": run_id,
-                    "capability": capability,
-                    "preview": preview,
-                    "reason": reason,
-                },
-            )
-        )
+        payload = {
+            "requestId": request_id,
+            "runId": run_id,
+            "capability": capability,
+            "preview": preview,
+            "reason": reason,
+        }
+        ev = create_event(EventType.PERMISSION_REQUEST, payload)
+        self._pending_permission_events[request_id] = {"runId": run_id, "event": ev}
+
+        # If no clients are connected, keep it queued until someone connects.
+        if self.clients:
+            await self._broadcast_event(create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "waiting_permission"}))
+            await self._broadcast_event(ev)
         try:
             return await fut
         finally:
             self._permission_waiters.pop(request_id, None)
+            self._pending_permission_events.pop(request_id, None)
 
     async def _supervisor_loop(self):
         interval_s = config.supervisor_interval_s()
@@ -141,7 +152,8 @@ class Gateway:
                 for s in due:
                     sched_id = str(s.get("id") or "")
                     title = str(s.get("title") or "") or sched_id
-                    user_input = str(s.get("input") or "")
+                    payload = s.get("payload") if isinstance(s.get("payload"), dict) else {}
+                    user_input = str((payload or {}).get("text") or "")
                     run_id = f"run_sched_{uuid4().hex[:10]}"
 
                     async def _sched_runner(run_id: str, user_input: str, title: str, sched_id: str):
@@ -152,9 +164,10 @@ class Gateway:
                             pass
                         await self._broadcast_event(create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "running"}))
                         try:
+                            scheduled_input = f"[scheduled:{sched_id}] {user_input}".strip()
                             async for ev in self.runtime.run(
                                 run_id=run_id,
-                                user_input=user_input,
+                                user_input=scheduled_input,
                                 policy=self.policy,
                                 ask_permission=lambda **kwargs: self._ask_permission_broadcast(**kwargs),
                             ):
@@ -180,19 +193,26 @@ class Gateway:
         fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self._permission_waiters[request_id] = fut
 
-        await self._send_event(
-            websocket,
-            create_event(
-                EventType.PERMISSION_REQUEST,
-                {
-                    "requestId": request_id,
-                    "runId": run_id,
-                    "capability": capability,
-                    "preview": preview,
-                    "reason": reason,
-                },
-            ),
-        )
+        try:
+            await self._send_event(websocket, create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "waiting_permission"}))
+            await self._send_event(
+                websocket,
+                create_event(
+                    EventType.PERMISSION_REQUEST,
+                    {
+                        "requestId": request_id,
+                        "runId": run_id,
+                        "capability": capability,
+                        "preview": preview,
+                        "reason": reason,
+                    },
+                ),
+            )
+        except Exception:
+            # If we can't prompt, treat as denied and abort the run.
+            if not fut.done():
+                fut.set_result("deny")
+            raise
         try:
             return await fut
         finally:
@@ -207,6 +227,7 @@ class Gateway:
         fut = self._permission_waiters.get(request_id)
         if fut and not fut.done():
             fut.set_result(decision)
+            self._pending_permission_events.pop(request_id, None)
             # Optional persistence of interactive approvals (disabled by default).
             cfg = config.load_config_uncached()
             remember_enabled = bool(((cfg.get("permissions") or {}).get("remember")) if isinstance(cfg, dict) else False)
@@ -228,7 +249,10 @@ class Gateway:
         await websocket.send_json(create_response(req.get("id", "unknown"), ok=True, payload={"runId": run_id, "status": "accepted"}))
 
         async def _runner():
-            await self._send_event(websocket, create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "running"}))
+            try:
+                await self._send_event(websocket, create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "running"}))
+            except Exception:
+                return
             try:
                 async for ev in self.runtime.run(
                     run_id=run_id,
@@ -236,12 +260,19 @@ class Gateway:
                     policy=self.policy,
                     ask_permission=lambda **kwargs: self.ask_permission(websocket, **kwargs),
                 ):
-                    await self._send_event(websocket, ev)
+                    try:
+                        await self._send_event(websocket, ev)
+                    except Exception:
+                        # Client disconnected; stop streaming this run.
+                        return
             except Exception as e:
-                await self._send_event(
-                    websocket,
-                    create_event(EventType.RUN_ERROR, {"runId": run_id, "message": str(e)}),
-                )
+                try:
+                    await self._send_event(
+                        websocket,
+                        create_event(EventType.RUN_ERROR, {"runId": run_id, "message": str(e)}),
+                    )
+                except Exception:
+                    return
 
         asyncio.create_task(_runner())
 
@@ -295,6 +326,18 @@ def create_app() -> FastAPI:
                     payload={"gatewayVersion": "2.0.0", "supportedMethods": ["run.create", "run.cancel", "permission.respond"]},
                 )
             )
+            # Deliver any queued permission requests (offline-safe scheduled runs).
+            for item in list(gateway._pending_permission_events.values()):
+                try:
+                    rid = str((item or {}).get("runId", "") or "")
+                    ev = (item or {}).get("event")
+                    if rid:
+                        await gateway._send_event(websocket, create_event(EventType.RUN_STATUS, {"runId": rid, "status": "waiting_permission"}))
+                    if isinstance(ev, dict):
+                        await gateway._send_event(websocket, ev)
+                except Exception:
+                    # best-effort
+                    pass
 
             # main loop
             while True:
