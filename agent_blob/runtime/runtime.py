@@ -49,7 +49,7 @@ class Runtime:
         self._llm = None
         self.capabilities = CapabilityRegistry(
             providers=[
-                LocalProvider(memory=self.memory),
+                LocalProvider(memory=self.memory, schedules=self.schedules),
                 SkillsProvider(),
                 MCPProvider(),
             ]
@@ -241,6 +241,9 @@ class Runtime:
             "Never write to project files or run shell commands just to 'remember' something. Use the memory system instead.\n"
             "For memory management, use memory_search/memory_list_recent to find items and memory_delete to remove them.\n"
             "For file edits, prefer fs_glob/fs_grep/filesystem_read to locate the right file, then use edit_apply_patch for changes.\n"
+            "Use filesystem_write primarily for creating new files or full overwrites; use edit_apply_patch for modifying existing files.\n"
+            "For scheduling background jobs, use schedule_create_interval, schedule_list, and schedule_delete.\n"
+            "For wall-clock schedules, prefer schedule_create_daily or schedule_create_cron (cron uses min hour dom mon dow) and include an IANA timezone when possible.\n"
             "Do NOT use shell_run to modify files (e.g. '>', '>>', 'tee', 'sed -i'). Use filesystem_write or edit_apply_patch.\n"
             "Only use tools when necessary to complete a user-requested task."
         )
@@ -531,9 +534,43 @@ class Runtime:
     async def _maybe_introspect(self, *, user_input: str) -> Optional[str]:
         q = (user_input or "").lower()
         wants_tasks = any(p in q for p in ["what tasks", "tasks running", "what are you doing", "what's running", "what are you working", "background tasks"])
-        wants_schedule = any(p in q for p in ["scheduled", "schedule", "reminders", "what's scheduled"])
+        # Only treat schedules as "introspection" for status-style queries.
+        # If the user is asking to create/update/delete a schedule, we should NOT short-circuit the agent loop;
+        # the LLM should use schedule_create_interval/schedule_delete tools instead.
+        wants_schedule = any(p in q for p in ["scheduled", "what's scheduled", "list schedules", "show schedules", "scheduled jobs", "my schedules"])
+        schedule_action = any(
+            p in q
+            for p in [
+                "create a schedule",
+                "create schedule",
+                "add a schedule",
+                "add schedule",
+                "set up a schedule",
+                "setup a schedule",
+                "schedule me",
+                "delete schedule",
+                "remove schedule",
+                "update schedule",
+                "change schedule",
+                "every ",
+                "interval",
+            ]
+        )
+        if schedule_action:
+            wants_schedule = False
+        wants_memory = any(
+            p in q
+            for p in [
+                "what do you remember",
+                "what do you remember from our conversation",
+                "what did we talk about",
+                "list memories",
+                "recent memories",
+                "show memories",
+            ]
+        )
 
-        if not (wants_tasks or wants_schedule):
+        if not (wants_tasks or wants_schedule or wants_memory):
             return None
 
         out = []
@@ -562,6 +599,22 @@ class Runtime:
             for s in schedules[:10]:
                 out.append(f"- {s.get('id','(no id)')}: next_run_at={s.get('next_run_at')}")
             if not schedules:
+                out.append("- (none)")
+
+        if wants_memory:
+            pinned = await self.memory.get_pinned()
+            recent = await self.memory.list_recent_structured(limit=10)
+            out.append(f"Pinned memory items: {len(pinned)}")
+            for p in pinned[:10]:
+                if isinstance(p, dict):
+                    out.append(f"- {p.get('content')}")
+            if not pinned:
+                out.append("- (none)")
+            out.append(f"Recent structured memories: {len(recent)}")
+            for m in recent[:10]:
+                if isinstance(m, dict):
+                    out.append(f"- ({m.get('type')}) {m.get('content')}")
+            if not recent:
                 out.append("- (none)")
 
         return "\n".join(out) + "\n"

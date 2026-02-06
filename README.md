@@ -41,6 +41,7 @@ agent_blob/
 scripts/
   run_gateway.py  # start server
   cli.py          # CLI entrypoint (implementation lives in agent_blob/clients/cli/)
+  mcp_example_server.py  # local MCP test server (optional)
 data/             # JSONL event log + memory + tasks (created at runtime)
 agent_blob.json   # policy + data dir config
 ```
@@ -56,6 +57,62 @@ agent_blob.json   # policy + data dir config
 - **Skills**: local `SKILL.md` files in `skills/` (and any other dirs configured in `agent_blob.json`) are injected as enabled skills and can be listed/read via `skills_list`/`skills_get`.
 - **MCP**: `agent_blob/runtime/mcp/` implements MCP Streamable HTTP. Configure servers in `agent_blob.json` under `mcp.servers`, then use `mcp_list_tools` + `mcp_call` (or `mcp_refresh`).
 - **Web fetch**: `web_fetch` can fetch URLs for summarization/research (permission-gated).
+
+## MCP (how to test)
+
+1) Start the example MCP server (optional, for local testing):
+
+```bash
+python3 scripts/mcp_example_server.py --port 9000
+```
+
+2) Add it to `agent_blob.json`:
+
+```json
+{
+  "mcp": {
+    "servers": [
+      { "name": "example", "url": "http://127.0.0.1:9000/mcp", "transport": "streamable-http" }
+    ]
+  }
+}
+```
+
+3) Restart the gateway, then in the CLI ask:
+- “List MCP servers”
+- “List MCP tools”
+- “Call `example.echo` with text hello”
+
+MCP tools available in the example server:
+- `example.echo` (`{ "text": "..." }`)
+- `example.add` (`{ "a": 2, "b": 3 }`)
+- `example.time` (`{}`)
+
+## Skills
+
+Skills are local folders containing `SKILL.md` files (OpenClaw-style). Configure:
+- `skills.dirs` (where to search)
+- `skills.enabled` (which ones to inject into the system prompt)
+- `skills.max_chars` (cap total injected skill text)
+
+Runtime tools:
+- `skills_list` (shows available + enabled)
+- `skills_get` (returns a skill body)
+
+## Scheduler (background runs)
+
+Schedules are stored in `data/schedules.json` and are triggered by the gateway supervisor loop.
+
+Runtime tools:
+- `schedule_list`
+- `schedule_create_interval` (capability `schedules.write`, prompts by default)
+- `schedule_create_daily` (capability `schedules.write`, prompts by default)
+- `schedule_create_cron` (capability `schedules.write`, prompts by default)
+- `schedule_delete` (capability `schedules.write`, prompts by default)
+
+Example prompt to the agent:
+- “Every 60 seconds, check my tasks and tell me what’s still running.”
+- “Every day at 7:30 AM, give me a morning briefing about my tasks.” (set `scheduler.timezone` in `agent_blob.json` if needed)
 
 ## Data folder
 
@@ -139,21 +196,20 @@ The agent can manage structured memories without using the shell:
    - Ask: “In `tmp/test.txt`, change `hello` to `hello!`.”
    - Confirm the agent uses `edit_apply_patch` and you see a diff preview.
 
-3) **MCP**
-   - Run `mcp_list_tools` and `mcp_call` against your configured MCP server.
+4) **MCP**
+   - Start `python3 scripts/mcp_example_server.py --port 9000`.
+   - Add the server to `agent_blob.json` and restart gateway.
+   - Ask: “List MCP servers”, then “List MCP tools”, then “Call `example.add` with a=2 b=3”.
 
-4) **Skills**
-   - Ask “list skills” and “get skill summarize”.
+5) **Skills**
+   - Ask “list skills” and “get skill general”.
 
-## Skills
+Bundled example skills live under `agent_blob/runtime/skills/examples/`. Your own skills can live in `./skills/`.
 
-Skills live under `skills/` as folders containing `SKILL.md`. Configure:
-- `skills.dirs` (search paths)
-- `skills.enabled` (injected into the system prompt)
-- `skills.max_chars` (cap total injected skill text)
-
-Use tools:
-- `skills_list`
-- `skills_get`
-
-Bundled starter skills: `summarize`, `skill-creator`, `obsidian`.
+6) **Scheduler**
+   - Ask: “Create a schedule to say ‘hello from schedule’ every 10 seconds.”
+   - Approve the schedule write prompt.
+   - Wait ~15 seconds and confirm you see a background run (run ids like `run_sched_*`) producing output.
+   - Ask: “List schedules” (should show the new schedule).
+   - Ask: “Every day at 7:30 AM, remind me to check positions.”
+   - Approve the schedule write prompt, then “List schedules” and confirm a `type: cron` schedule exists.

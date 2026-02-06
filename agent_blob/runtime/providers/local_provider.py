@@ -16,8 +16,9 @@ from agent_blob.runtime.tools.registry import ToolDefinition
 class LocalProvider:
     name = "local"
 
-    def __init__(self, *, memory: MemoryStore):
+    def __init__(self, *, memory: MemoryStore, schedules):
         self.memory = memory
+        self.schedules = schedules
 
     def tools(self) -> List[ToolDefinition]:
         async def _fs_read(args: Dict[str, Any]) -> Any:
@@ -64,6 +65,47 @@ class LocalProvider:
                 patch=str(args.get("patch", "")),
                 create_parents=bool(args.get("create_parents", True)),
             )
+
+        async def _schedule_list(args: Dict[str, Any]) -> Any:
+            await self.schedules.startup()
+            return {"ok": True, "schedules": await self.schedules.list_schedules()}
+
+        async def _schedule_create_interval(args: Dict[str, Any]) -> Any:
+            await self.schedules.startup()
+            rec = await self.schedules.create_interval(
+                input=str(args.get("input", "") or ""),
+                interval_s=int(args.get("interval_s", 60) or 60),
+                enabled=bool(args.get("enabled", True)),
+                title=str(args.get("title", "") or "") or None,
+            )
+            return {"ok": True, "schedule": rec}
+
+        async def _schedule_create_daily(args: Dict[str, Any]) -> Any:
+            await self.schedules.startup()
+            rec = await self.schedules.create_daily(
+                input=str(args.get("input", "") or ""),
+                hour=int(args.get("hour", 7) or 7),
+                minute=int(args.get("minute", 30) or 30),
+                tz=(str(args.get("tz")).strip() if args.get("tz") is not None else None),
+                enabled=bool(args.get("enabled", True)),
+                title=str(args.get("title", "") or "") or None,
+            )
+            return {"ok": True, "schedule": rec}
+
+        async def _schedule_create_cron(args: Dict[str, Any]) -> Any:
+            await self.schedules.startup()
+            rec = await self.schedules.create_cron(
+                input=str(args.get("input", "") or ""),
+                cron=str(args.get("cron", "") or ""),
+                tz=(str(args.get("tz")).strip() if args.get("tz") is not None else None),
+                enabled=bool(args.get("enabled", True)),
+                title=str(args.get("title", "") or "") or None,
+            )
+            return {"ok": True, "schedule": rec}
+
+        async def _schedule_delete(args: Dict[str, Any]) -> Any:
+            await self.schedules.startup()
+            return await self.schedules.delete(schedule_id=str(args.get("id", "") or ""))
 
         memory_search, memory_list_recent, memory_delete = build_memory_tools(self.memory)
 
@@ -123,7 +165,7 @@ class LocalProvider:
             ToolDefinition(
                 name="edit_apply_patch",
                 capability="filesystem.write",
-                description="Apply a unified diff patch to a file (requires permission).",
+                description="Preferred for modifying existing files: apply a unified diff patch (requires permission).",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -138,7 +180,7 @@ class LocalProvider:
             ToolDefinition(
                 name="filesystem_write",
                 capability="filesystem.write",
-                description="Write a text file within the allowed root (requires permission).",
+                description="Write/overwrite a full text file (requires permission). Prefer edit_apply_patch for edits to existing files.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -176,6 +218,75 @@ class LocalProvider:
                     "required": ["url"],
                 },
                 executor=_web_fetch,
+            ),
+            ToolDefinition(
+                name="schedule_list",
+                capability="schedules.list",
+                description="List schedules (interval-based) that can trigger background runs.",
+                parameters={"type": "object", "properties": {}},
+                executor=_schedule_list,
+            ),
+            ToolDefinition(
+                name="schedule_create_interval",
+                capability="schedules.write",
+                description="Create an interval schedule that triggers a run every N seconds.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "input": {"type": "string", "description": "What the agent should do when the schedule runs"},
+                        "interval_s": {"type": "integer", "description": "Interval in seconds", "default": 3600},
+                        "enabled": {"type": "boolean", "description": "Whether the schedule is active", "default": True},
+                        "title": {"type": "string", "description": "Optional short title"},
+                    },
+                    "required": ["input", "interval_s"],
+                },
+                executor=_schedule_create_interval,
+            ),
+            ToolDefinition(
+                name="schedule_create_daily",
+                capability="schedules.write",
+                description="Create a daily schedule at a specific local time (hour/minute).",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "input": {"type": "string", "description": "What the agent should do when the schedule runs"},
+                        "hour": {"type": "integer", "description": "Hour (0-23)"},
+                        "minute": {"type": "integer", "description": "Minute (0-59)"},
+                        "tz": {"type": "string", "description": "IANA timezone, e.g. America/Los_Angeles (optional)"},
+                        "enabled": {"type": "boolean", "description": "Whether the schedule is active", "default": True},
+                        "title": {"type": "string", "description": "Optional short title"},
+                    },
+                    "required": ["input", "hour", "minute"],
+                },
+                executor=_schedule_create_daily,
+            ),
+            ToolDefinition(
+                name="schedule_create_cron",
+                capability="schedules.write",
+                description="Create a cron schedule (5-field: min hour dom mon dow).",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "input": {"type": "string", "description": "What the agent should do when the schedule runs"},
+                        "cron": {"type": "string", "description": "Cron expression: min hour dom mon dow"},
+                        "tz": {"type": "string", "description": "IANA timezone, e.g. America/New_York (optional)"},
+                        "enabled": {"type": "boolean", "description": "Whether the schedule is active", "default": True},
+                        "title": {"type": "string", "description": "Optional short title"},
+                    },
+                    "required": ["input", "cron"],
+                },
+                executor=_schedule_create_cron,
+            ),
+            ToolDefinition(
+                name="schedule_delete",
+                capability="schedules.write",
+                description="Delete a schedule by id.",
+                parameters={
+                    "type": "object",
+                    "properties": {"id": {"type": "string", "description": "Schedule id"}},
+                    "required": ["id"],
+                },
+                executor=_schedule_delete,
             ),
             ToolDefinition(
                 name="memory_search",

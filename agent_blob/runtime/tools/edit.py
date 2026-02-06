@@ -15,13 +15,25 @@ def _apply_unified_diff(old_text: str, diff_text: str) -> str:
     old_lines = old_text.splitlines(keepends=True)
     diff_lines = diff_text.splitlines(keepends=True)
 
-    # Skip headers if present.
+    # Skip common diff headers until the first hunk.
     i = 0
-    while i < len(diff_lines) and (diff_lines[i].startswith("---") or diff_lines[i].startswith("+++")):
+    while i < len(diff_lines):
+        line = diff_lines[i]
+        if line.startswith("@@"):
+            break
+        if line.startswith(("diff --git", "index ", "new file mode", "deleted file mode")):
+            i += 1
+            continue
+        if line.startswith("---") or line.startswith("+++"):
+            i += 1
+            continue
+        if not line.strip():
+            i += 1
+            continue
+        # Unknown header line; skip it defensively.
         i += 1
-    if i < len(diff_lines) and diff_lines[i].startswith("@@"):
-        pass
-    elif i >= len(diff_lines):
+    if i >= len(diff_lines):
+        # No hunks -> no change.
         return old_text
 
     out: List[str] = []
@@ -61,10 +73,22 @@ def _apply_unified_diff(old_text: str, diff_text: str) -> str:
             dl = diff_lines[i]
             if dl.startswith(" "):
                 # context line: must match
-                out.append(old_lines[old_idx])
+                expected = dl[1:]
+                if old_idx >= len(old_lines):
+                    raise ValueError("Patch context extends past end of file")
+                actual = old_lines[old_idx]
+                if actual != expected:
+                    raise ValueError("Patch context mismatch")
+                out.append(actual)
                 old_idx += 1
             elif dl.startswith("-"):
                 # deletion
+                expected = dl[1:]
+                if old_idx >= len(old_lines):
+                    raise ValueError("Patch deletion extends past end of file")
+                actual = old_lines[old_idx]
+                if actual != expected:
+                    raise ValueError("Patch deletion mismatch")
                 old_idx += 1
             elif dl.startswith("+"):
                 out.append(dl[1:])
@@ -114,4 +138,3 @@ async def edit_preview_patch(*, path: str, patch: str) -> dict:
     )
     text = "".join(diff)
     return {"ok": True, "path": str(old_res.get("path")), "preview": text}
-

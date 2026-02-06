@@ -57,6 +57,38 @@ class Gateway:
             except Exception:
                 self.clients.pop(ws, None)
 
+    async def _ask_permission_broadcast(
+        self,
+        *,
+        run_id: str,
+        capability: str,
+        preview: str,
+        reason: str,
+    ) -> str:
+        """
+        Permission prompt that any connected client can answer.
+        Used for background/scheduled runs.
+        """
+        request_id = f"perm_{uuid4().hex[:12]}"
+        fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._permission_waiters[request_id] = fut
+        await self._broadcast_event(
+            create_event(
+                EventType.PERMISSION_REQUEST,
+                {
+                    "requestId": request_id,
+                    "runId": run_id,
+                    "capability": capability,
+                    "preview": preview,
+                    "reason": reason,
+                },
+            )
+        )
+        try:
+            return await fut
+        finally:
+            self._permission_waiters.pop(request_id, None)
+
     async def _supervisor_loop(self):
         interval_s = config.supervisor_interval_s()
         debug_ticks = config.supervisor_debug()
@@ -102,6 +134,35 @@ class Gateway:
                                 },
                             )
                         )
+
+                # Trigger due schedules (best-effort). If there are no clients connected, scheduled runs
+                # will still execute, but any permission prompts must be answered by a client.
+                due = await self.runtime.schedules.pop_due()
+                for s in due:
+                    sched_id = str(s.get("id") or "")
+                    title = str(s.get("title") or "") or sched_id
+                    user_input = str(s.get("input") or "")
+                    run_id = f"run_sched_{uuid4().hex[:10]}"
+
+                    async def _sched_runner(run_id: str, user_input: str, title: str, sched_id: str):
+                        await self._broadcast_event(create_event(EventType.RUN_LOG, {"runId": "supervisor", "message": f"schedule triggered: {title} ({sched_id}) -> {run_id}"}))
+                        try:
+                            await self.runtime.schedules.set_last_run_id(schedule_id=sched_id, run_id=run_id)
+                        except Exception:
+                            pass
+                        await self._broadcast_event(create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "running"}))
+                        try:
+                            async for ev in self.runtime.run(
+                                run_id=run_id,
+                                user_input=user_input,
+                                policy=self.policy,
+                                ask_permission=lambda **kwargs: self._ask_permission_broadcast(**kwargs),
+                            ):
+                                await self._broadcast_event(ev)
+                        except Exception as e:
+                            await self._broadcast_event(create_event(EventType.RUN_ERROR, {"runId": run_id, "message": str(e)}))
+
+                    asyncio.create_task(_sched_runner(run_id, user_input, title, sched_id))
             except Exception as e:
                 await self._broadcast_event(create_event(EventType.RUN_LOG, {"runId": "supervisor", "message": f"supervisor error: {e}"}))
             await asyncio.sleep(interval_s)
@@ -147,7 +208,7 @@ class Gateway:
         if fut and not fut.done():
             fut.set_result(decision)
             # Optional persistence of interactive approvals (disabled by default).
-            cfg = config.load_config()
+            cfg = config.load_config_uncached()
             remember_enabled = bool(((cfg.get("permissions") or {}).get("remember")) if isinstance(cfg, dict) else False)
             if remember_enabled and remember and isinstance(capability, str) and capability:
                 try:

@@ -25,6 +25,9 @@
     "debug": false,
     "maintenance_interval_s": 60
   },
+  "scheduler": {
+    "timezone": null
+  },
   "clients": {
     "cli": {
       "device_id": "cli"
@@ -44,7 +47,7 @@
     "max_chars": 12000
   },
   "mcp": {
-    "servers": []
+    "servers": [{ "name": "example", "url": "http://127.0.0.1:9000/mcp", "transport": "streamable-http" }]
   },
   "tools": {
     "allowed_fs_root": null
@@ -85,7 +88,8 @@
       "mcp.call",
       "web.fetch",
       "shell.run",
-      "shell.write"
+      "shell.write",
+      "schedules.write"
     ],
     "allow": [
       "filesystem.read",
@@ -97,7 +101,8 @@
       "memory.list",
       "skills.*",
       "mcp.list",
-      "mcp.refresh"
+      "mcp.refresh",
+      "schedules.list"
     ]
   }
 }
