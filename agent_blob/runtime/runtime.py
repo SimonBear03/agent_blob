@@ -18,6 +18,7 @@ from agent_blob.runtime.storage.scheduler import SchedulerStore
 from agent_blob.runtime.llm import OpenAIChatCompletionsProvider
 from agent_blob.runtime.tools.registry import ToolDefinition, ToolRegistry
 from agent_blob.runtime.memory import MemoryService
+from agent_blob.runtime.prompts import build_system_messages
 from agent_blob.runtime.capabilities.registry import CapabilityRegistry
 from agent_blob.runtime.providers import LocalProvider, SkillsProvider, MCPProvider, WorkersProvider
 from agent_blob.runtime.tools.filesystem import filesystem_read_optional
@@ -240,37 +241,13 @@ class Runtime:
         recent_turns: list[dict],
         scheduled_id: str | None = None,
     ) -> list[dict]:
-        system = (
-            "You are Agent Blob, a helpful always-on master AI. Be concise and actionable.\n"
-            "Never write to project files or run shell commands just to 'remember' something. Use the memory system instead.\n"
-            "For memory management, use memory_search/memory_list_recent to inspect memories.\n"
-            "Only call memory_delete when the user explicitly asks to forget/remove/delete memory.\n"
-            "There is no direct memory-add tool; memory is saved automatically from conversation context.\n"
-            "For file edits, prefer fs_glob/fs_grep/filesystem_read to locate the right file, then use edit_apply_patch for changes.\n"
-            "Use filesystem_write primarily for creating new files or full overwrites; use edit_apply_patch for modifying existing files.\n"
-            "For scheduling background jobs, use schedule_create_interval, schedule_list, and schedule_delete.\n"
-            "For wall-clock schedules, prefer schedule_create_daily or schedule_create_cron (cron uses min hour dom mon dow) and include an IANA timezone when possible.\n"
-            "To pause/resume a schedule, use schedule_update (enabled=true/false).\n"
-            "For multitasking, you may delegate to specialized workers via worker_run (briefing/quant/dev) and then report the result to the user.\n"
-            "Do NOT use shell_run to modify files (e.g. '>', '>>', 'tee', 'sed -i'). Use filesystem_write or edit_apply_patch.\n"
-            "Only use tools when necessary to complete a user-requested task."
-        )
         cap_instructions = self.capabilities.system_instructions()
-        if cap_instructions:
-            system = system + "\n\n" + cap_instructions.strip()
-        msgs: list[dict] = [{"role": "system", "content": system}]
-        if scheduled_id:
-            msgs.append(
-                {
-                    "role": "system",
-                    "content": (
-                        f"This message was triggered by a schedule (id={scheduled_id}).\n"
-                        "Execute the scheduled prompt now.\n"
-                        "Do not suggest \"I can help you set up a schedule\"—the schedule already exists.\n"
-                        "If the prompt requires tools (shell/filesystem/MCP), call the appropriate tools."
-                    ),
-                }
-            )
+        prompt_mode = "scheduled" if scheduled_id else "master"
+        msgs: list[dict] = build_system_messages(
+            mode=prompt_mode,
+            capability_instructions=cap_instructions,
+            scheduled_id=scheduled_id,
+        )
         if pinned:
             msgs.append({"role": "system", "content": f"Pinned memory (authoritative): {pinned}"})
         if structured:
@@ -517,22 +494,10 @@ class Runtime:
         # Pick tool subset by worker type.
         if worker_type == "briefing":
             allowed = {"web_fetch"}
-            system = (
-                "You are a briefing worker. Execute the user's prompt by gathering information if needed and returning a concise result.\n"
-                "You may use web_fetch when necessary. Be concise.\n"
-            )
         elif worker_type == "quant":
             allowed = {"mcp_list_servers", "mcp_list_tools", "mcp_refresh", "mcp_call", "mcp_list_prompts", "mcp_get_prompt"}
-            system = (
-                "You are a quant worker. Execute the user's prompt by calling MCP tools as needed and returning a concise result.\n"
-                "Prefer querying state (positions/risk) over making changes.\n"
-            )
         elif worker_type == "dev":
             allowed = {"fs_glob", "fs_grep", "filesystem_read", "edit_apply_patch", "filesystem_write"}
-            system = (
-                "You are a dev worker. Execute the user's prompt using filesystem search/read and patch-based edits.\n"
-                "Prefer edit_apply_patch for modifications.\n"
-            )
         else:
             return {"ok": False, "error": f"Unknown worker_type: {worker_type}"}
 
@@ -543,7 +508,9 @@ class Runtime:
                 tool_defs.append(t)
 
         worker_tools = ToolRegistry(tool_defs)
-        worker_messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+        worker_messages = build_system_messages(mode="worker", worker_type=worker_type) + [
+            {"role": "user", "content": prompt}
+        ]
 
         if self._llm is None:
             self._llm = OpenAIChatCompletionsProvider()

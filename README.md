@@ -61,6 +61,12 @@ agent_blob.json   # policy + data dir config
 - **events.jsonl** is canonical run history at `memory/events.jsonl`; recent turns + episodic recall are derived from it.
 - **Skills**: local `SKILL.md` files in `skills/` (and any other dirs configured in `agent_blob.json`) are injected as enabled skills and can be listed/read via `skills_list`/`skills_get`.
 - **MCP**: `agent_blob/runtime/mcp/` implements MCP Streamable HTTP. Configure servers in `agent_blob.json` under `mcp.servers`, then use `mcp_list_tools` + `mcp_call` (or `mcp_refresh`).
+- **System prompt**: built from modular prompt blocks in `agent_blob/runtime/prompts/system_prompt.py` (`master`, `scheduled`, `worker` modes) plus provider instructions.
+- Prompt behavior can be tuned in `agent_blob.json` under `prompts`:
+  - `include_memory_policy`, `include_editing_policy`, `include_tool_policy`
+  - `include_examples`, `include_scheduling_policy`
+  - `allow_worker_delegation`, `worker_include_change_summary`
+  - `scheduled_force_execute`, `extra_instructions`
 - **Web fetch**: `web_fetch` can fetch URLs for summarization/research (permission-gated).
 - **Channel routing policy**: no broadcast by default. Replies go back to the origin client/channel only (CLI input -> CLI output, Telegram input -> Telegram output).
 
