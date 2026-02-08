@@ -10,8 +10,15 @@
     "model_name": "gpt-4o-mini"
   },
   "memory": {
+    "dir": "./memory",
     "extraction_model": null,
     "importance_min": 6,
+    "retrieval": {
+      "recent_turns_limit": 8,
+      "related_turns_limit": 5,
+      "structured_limit": 5,
+      "introspection_limit": 10
+    },
     "embedding_model": "text-embedding-3-small",
     "embeddings": {
       "enabled": true,
@@ -28,9 +35,27 @@
   "scheduler": {
     "timezone": null
   },
-  "clients": {
-    "cli": {
-      "device_id": "cli"
+  "frontends": {
+    "native": {
+      "cli": {
+        "device_id": "cli"
+      }
+    },
+    "adapters": {
+      "telegram": {
+        "enabled": true,
+        "mode": "polling",
+        "poll_interval_s": 1.5,
+        "stream_edit_interval_ms": 700,
+        "status_verbosity": "minimal",
+        "max_message_chars": 3800,
+        "media": {
+          "enabled": true,
+          "download": true,
+          "max_file_mb": 25,
+          "download_dir": "./data/media/telegram"
+        }
+      }
     }
   },
   "skills": {
@@ -71,7 +96,7 @@
       "keep_days": 30,
       "keep_max_files": 50
     },
-    "memories": {
+    "memory_events": {
       "max_bytes": 5000000,
       "keep_days": 30,
       "keep_max_files": 50

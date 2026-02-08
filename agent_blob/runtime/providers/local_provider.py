@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from agent_blob.runtime.capabilities.provider import CapabilityProvider
-from agent_blob.runtime.storage.memory_store import MemoryStore
+from agent_blob.runtime.memory.service import MemoryService
 from agent_blob.runtime.tools.filesystem import filesystem_read, filesystem_list, filesystem_write
 from agent_blob.runtime.tools.memory import build_memory_tools
 from agent_blob.runtime.tools.shell import shell_run
@@ -16,7 +16,7 @@ from agent_blob.runtime.tools.registry import ToolDefinition
 class LocalProvider:
     name = "local"
 
-    def __init__(self, *, memory: MemoryStore, schedules):
+    def __init__(self, *, memory: MemoryService, schedules):
         self.memory = memory
         self.schedules = schedules
 

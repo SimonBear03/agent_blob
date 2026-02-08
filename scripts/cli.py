@@ -7,7 +7,7 @@ from pathlib import Path
 root_dir = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root_dir))
 
-from agent_blob.clients.cli import main
+from agent_blob.frontends.native.cli import main
 
 
 if __name__ == "__main__":

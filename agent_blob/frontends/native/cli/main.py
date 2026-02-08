@@ -11,7 +11,7 @@ from typing import Dict, Optional
 import websockets
 from dotenv import load_dotenv
 
-from agent_blob.clients.common.printer import Printer
+from agent_blob.frontends.native.common.printer import Printer
 from agent_blob import config
 
 

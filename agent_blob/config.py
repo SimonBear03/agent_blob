@@ -56,6 +56,11 @@ def data_dir() -> str:
     return str(_get(cfg, "data", "dir", default="./data"))
 
 
+def memory_dir() -> str:
+    cfg = load_config()
+    return str(_get(cfg, "memory", "dir", default="./memory"))
+
+
 def llm_model_name() -> str:
     cfg = load_config()
     return str(_get(cfg, "llm", "model_name", default="gpt-4o-mini"))
@@ -97,6 +102,38 @@ def memory_embeddings_batch_size() -> int:
         return 16
 
 
+def memory_recent_turns_limit() -> int:
+    cfg = load_config()
+    try:
+        return int(_get(cfg, "memory", "retrieval", "recent_turns_limit", default=8))
+    except Exception:
+        return 8
+
+
+def memory_related_turns_limit() -> int:
+    cfg = load_config()
+    try:
+        return int(_get(cfg, "memory", "retrieval", "related_turns_limit", default=5))
+    except Exception:
+        return 5
+
+
+def memory_structured_limit() -> int:
+    cfg = load_config()
+    try:
+        return int(_get(cfg, "memory", "retrieval", "structured_limit", default=5))
+    except Exception:
+        return 5
+
+
+def memory_introspection_limit() -> int:
+    cfg = load_config()
+    try:
+        return int(_get(cfg, "memory", "retrieval", "introspection_limit", default=10))
+    except Exception:
+        return 10
+
+
 def memory_vector_scan_limit() -> int:
     cfg = load_config()
     try:
@@ -136,7 +173,10 @@ def maintenance_interval_s() -> float:
 
 def cli_device_id() -> str:
     cfg = load_config()
-    return str(_get(cfg, "clients", "cli", "device_id", default="cli"))
+    value = _get(cfg, "frontends", "native", "cli", "device_id", default=None)
+    if value is None:
+        value = _get(cfg, "clients", "cli", "device_id", default="cli")
+    return str(value or "cli")
 
 
 def allowed_fs_root() -> Optional[str]:
@@ -231,3 +271,95 @@ def mcp_servers() -> list[dict]:
     cfg = load_config()
     v = _get(cfg, "mcp", "servers", default=[])
     return list(v or []) if isinstance(v, list) else []
+
+
+def telegram_enabled() -> bool:
+    cfg = load_config()
+    value = _get(cfg, "frontends", "adapters", "telegram", "enabled", default=None)
+    if value is None:
+        value = _get(cfg, "channels", "telegram", "enabled", default=False)
+    return bool(value)
+
+
+def telegram_mode() -> str:
+    cfg = load_config()
+    value = _get(cfg, "frontends", "adapters", "telegram", "mode", default=None)
+    if value is None:
+        value = _get(cfg, "channels", "telegram", "mode", default="polling")
+    return str(value or "polling")
+
+
+def telegram_poll_interval_s() -> float:
+    cfg = load_config()
+    try:
+        value = _get(cfg, "frontends", "adapters", "telegram", "poll_interval_s", default=None)
+        if value is None:
+            value = _get(cfg, "channels", "telegram", "poll_interval_s", default=1.5)
+        return float(value)
+    except Exception:
+        return 1.5
+
+
+def telegram_stream_edit_interval_ms() -> int:
+    cfg = load_config()
+    try:
+        value = _get(cfg, "frontends", "adapters", "telegram", "stream_edit_interval_ms", default=None)
+        if value is None:
+            value = _get(cfg, "channels", "telegram", "stream_edit_interval_ms", default=700)
+        return int(value)
+    except Exception:
+        return 700
+
+
+def telegram_status_verbosity() -> str:
+    cfg = load_config()
+    value = _get(cfg, "frontends", "adapters", "telegram", "status_verbosity", default=None)
+    if value is None:
+        value = _get(cfg, "channels", "telegram", "status_verbosity", default="minimal")
+    return str(value or "minimal")
+
+
+def telegram_max_message_chars() -> int:
+    cfg = load_config()
+    try:
+        value = _get(cfg, "frontends", "adapters", "telegram", "max_message_chars", default=None)
+        if value is None:
+            value = _get(cfg, "channels", "telegram", "max_message_chars", default=3800)
+        return int(value)
+    except Exception:
+        return 3800
+
+
+def telegram_media_enabled() -> bool:
+    cfg = load_config()
+    value = _get(cfg, "frontends", "adapters", "telegram", "media", "enabled", default=None)
+    if value is None:
+        value = _get(cfg, "channels", "telegram", "media", "enabled", default=True)
+    return bool(value)
+
+
+def telegram_media_download() -> bool:
+    cfg = load_config()
+    value = _get(cfg, "frontends", "adapters", "telegram", "media", "download", default=None)
+    if value is None:
+        value = _get(cfg, "channels", "telegram", "media", "download", default=True)
+    return bool(value)
+
+
+def telegram_media_max_file_mb() -> int:
+    cfg = load_config()
+    try:
+        value = _get(cfg, "frontends", "adapters", "telegram", "media", "max_file_mb", default=None)
+        if value is None:
+            value = _get(cfg, "channels", "telegram", "media", "max_file_mb", default=25)
+        return int(value)
+    except Exception:
+        return 25
+
+
+def telegram_media_download_dir() -> str:
+    cfg = load_config()
+    value = _get(cfg, "frontends", "adapters", "telegram", "media", "download_dir", default=None)
+    if value is None:
+        value = _get(cfg, "channels", "telegram", "media", "download_dir", default="./data/media/telegram")
+    return str(value or "./data/media/telegram")

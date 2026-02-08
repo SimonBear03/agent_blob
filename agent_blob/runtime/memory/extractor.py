@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-import json
-import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from agent_blob import config
 
 
 class MemoryExtractor:
     """
-    LLM-based extraction of structured long-term memories from a turn.
-
-    Output shape:
-      {"memories":[{"type":..., "content":..., "context":..., "importance":1-10, "tags":[...]}]}
+    Structured long-term memory extraction for a single completed turn.
+    The extractor is intentionally strict to reduce low-value memory churn.
     """
 
     def __init__(self):
@@ -21,29 +17,27 @@ class MemoryExtractor:
 
     def _system_prompt(self) -> str:
         return (
-            "You are a memory extraction system for a personal AI.\n"
-            "Extract only durable long-term memories that will be useful later.\n"
-            "Prefer concrete facts, preferences, decisions, ongoing projects, and open questions.\n"
-            "Avoid transient details, greetings, or one-off execution results unless they matter long-term.\n\n"
-            "If the user explicitly asks you to remember something (e.g. 'please remember ...'), you should almost always extract it\n"
-            "as a high-importance memory (importance 9-10) with a tag like 'explicit'.\n\n"
-            "Return JSON ONLY with this schema:\n"
-            '{ "memories": [ { "type": "fact|preference|decision|project|question",'
+            "You extract durable long-term memory for a personal AI assistant.\n"
+            "Only extract items that will still matter later.\n"
+            "Prefer: facts, preferences, decisions, project constraints, commitments, recurring routines.\n"
+            "Avoid: greetings, temporary chatter, and one-off execution noise.\n"
+            "Return JSON only with this schema:\n"
+            '{ "memories": [ { "type": "fact|preference|decision|project|routine|constraint",'
             ' "content": "string", "context": "string", "importance": 1, "tags": ["string"] } ] }\n'
-            "importance is 1-10, where 10 is critical.\n"
+            "importance must be 1-10."
         )
 
     def _user_prompt(self, user_text: str, assistant_text: str) -> str:
         return (
             "Extract durable memories from this exchange.\n\n"
-            f"USER:\n{user_text}\n\nASSISTANT:\n{assistant_text}\n"
+            f"USER:\n{user_text}\n\n"
+            f"ASSISTANT:\n{assistant_text}\n"
         )
 
     async def extract(self, *, llm: Any, user_text: str, assistant_text: str) -> List[Dict[str, Any]]:
-        # Quick heuristic: skip trivial turns
         if len((user_text or "").strip()) < 8:
             return []
-        if len((assistant_text or "").strip()) < 16:
+        if len((assistant_text or "").strip()) < 8:
             return []
 
         data = await llm.chat_json(
@@ -53,28 +47,31 @@ class MemoryExtractor:
                 {"role": "user", "content": self._user_prompt(user_text, assistant_text)},
             ],
         )
-        memories = data.get("memories") if isinstance(data, dict) else None
-        if not isinstance(memories, list):
+        raw = data.get("memories") if isinstance(data, dict) else None
+        if not isinstance(raw, list):
             return []
 
         out: List[Dict[str, Any]] = []
-        for m in memories:
-            if not isinstance(m, dict):
+        for item in raw:
+            if not isinstance(item, dict):
                 continue
-            importance = int(m.get("importance", 0) or 0)
-            if importance < self.min_importance:
-                continue
-            mem_type = str(m.get("type", "") or "").strip()
-            content = str(m.get("content", "") or "").strip()
+            mem_type = str(item.get("type", "") or "").strip()
+            content = str(item.get("content", "") or "").strip()
             if not mem_type or not content:
+                continue
+            try:
+                importance = int(item.get("importance", 0) or 0)
+            except Exception:
+                importance = 0
+            if importance < self.min_importance:
                 continue
             out.append(
                 {
                     "type": mem_type,
                     "content": content,
-                    "context": str(m.get("context", "") or "").strip(),
+                    "context": str(item.get("context", "") or "").strip(),
                     "importance": importance,
-                    "tags": list(m.get("tags") or []),
+                    "tags": [str(x) for x in (item.get("tags") or []) if str(x).strip()],
                 }
             )
         return out

@@ -13,12 +13,11 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Optional, List
 from agent_blob.protocol import EventType, create_event
 from agent_blob.policy.policy import Policy
 from agent_blob.runtime.storage.event_log import EventLog
-from agent_blob.runtime.storage.memory_store import MemoryStore
 from agent_blob.runtime.storage.tasks import TaskStore
 from agent_blob.runtime.storage.scheduler import SchedulerStore
 from agent_blob.runtime.llm import OpenAIChatCompletionsProvider
 from agent_blob.runtime.tools.registry import ToolDefinition, ToolRegistry
-from agent_blob.runtime.memory import MemoryExtractor
+from agent_blob.runtime.memory import MemoryService
 from agent_blob.runtime.capabilities.registry import CapabilityRegistry
 from agent_blob.runtime.providers import LocalProvider, SkillsProvider, MCPProvider, WorkersProvider
 from agent_blob.runtime.tools.filesystem import filesystem_read_optional
@@ -28,6 +27,10 @@ from agent_blob.config import (
     tasks_attach_window_s,
     tasks_auto_close_after_s,
     memory_embeddings_batch_size,
+    memory_recent_turns_limit,
+    memory_related_turns_limit,
+    memory_structured_limit,
+    memory_introspection_limit,
 )
 
 
@@ -44,7 +47,7 @@ class ToolContext:
 class Runtime:
     def __init__(self):
         self.event_log = EventLog()
-        self.memory = MemoryStore()
+        self.memory = MemoryService()
         self.tasks = TaskStore()
         self.schedules = SchedulerStore()
         self._llm = None
@@ -60,7 +63,6 @@ class Runtime:
         tool_defs = self.capabilities.tools()
         self._tool_defs_by_name = {t.name: t for t in tool_defs}
         self.tools = ToolRegistry(tool_defs)
-        self.memory_extractor = MemoryExtractor()
 
     async def startup(self):
         await self.event_log.startup()
@@ -88,12 +90,12 @@ class Runtime:
         keep_max = int(maint.get("tasks_keep_done_max", 200) or 200)
         purge_stats = await self.tasks.purge_done(keep_days=keep_days, keep_max=keep_max)
 
-        # Consolidate structured candidates into state (cheap incremental).
-        added = await self.memory.consolidate()
+        # Consolidation happens during ingest/upsert in MemoryService.
+        added = 0
         # Rotate/prune JSONL logs (best-effort).
         events_rot = await self.event_log.rotate_and_prune()
         tasks_events_rot = await self.tasks.rotate_and_prune_events()
-        memories_rot = await self.memory.rotate_and_prune_candidates()
+        memory_events_rot = await self.memory.rotate_and_prune_audit()
         embedded = 0
         try:
             if self._llm is None and os.getenv("OPENAI_API_KEY"):
@@ -106,7 +108,7 @@ class Runtime:
             "tasks": purge_stats,
             "tasks_autoclosed": auto_close_stats,
             "memory_added": added,
-            "logs": {"events": events_rot, "tasks_events": tasks_events_rot, "memories": memories_rot},
+            "logs": {"events": events_rot, "tasks_events": tasks_events_rot, "memory_events": memory_events_rot},
             "embeddings_updated": embedded,
         }
 
@@ -156,43 +158,13 @@ class Runtime:
             }
         )
 
-        # Explicit memory requests should never be "solved" by writing to repo files or running tools.
-        remembered = self._parse_explicit_remember(user_input)
-        if remembered is not None:
-            reply = f"Got it — I’ll remember: {remembered}"
-            yield create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "streaming"})
-            for part in self._chunk_text(reply, 240):
-                yield create_event(EventType.RUN_TOKEN, {"runId": run_id, "content": part})
-                await asyncio.sleep(0)
-            await self.event_log.append({"type": "run.output", "runId": run_id, "taskId": task_id, "text": reply})
-            # Store a high-importance explicit memory deterministically (no LLM/tool use required).
-            await self.memory.save_structured_memories(
-                run_id=run_id,
-                memories=[
-                    {
-                        "type": "fact",
-                        "content": remembered,
-                        "context": "User explicitly asked to remember this.",
-                        "importance": 10,
-                        "tags": ["explicit"],
-                    }
-                ],
-            )
-            await self.tasks.set_status(task_id=task_id, status="open")
-            yield create_event(EventType.RUN_FINAL, {"runId": run_id})
-            return
-
         yield create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "retrieving_memory"})
         pinned = await self.memory.get_pinned()
-        recent_turns = await self.event_log.recent_turns(limit=8)
-        related = await self.event_log.search_turns(user_input, limit=5)
-        structured: list[dict]
-        try:
-            if self._llm is None and os.getenv("OPENAI_API_KEY"):
-                self._llm = OpenAIChatCompletionsProvider()
-            structured = await self.memory.search_structured_hybrid(query=user_input, limit=5, llm=self._llm)
-        except Exception:
-            structured = await self.memory.search_structured(user_input, limit=5)
+        recent_turns = await self.event_log.recent_turns(limit=memory_recent_turns_limit())
+        related = await self.event_log.search_turns(user_input, limit=memory_related_turns_limit())
+        if self._llm is None and os.getenv("OPENAI_API_KEY"):
+            self._llm = OpenAIChatCompletionsProvider()
+        structured = await self.memory.search(query=user_input, limit=memory_structured_limit(), llm=self._llm)
 
         # Minimal agent loop for V2:
         # - keep explicit smoke-test commands for tools
@@ -208,7 +180,7 @@ class Runtime:
                 yield create_event(EventType.RUN_TOKEN, {"runId": run_id, "content": part})
                 await asyncio.sleep(0)
             await self.event_log.append({"type": "run.output", "runId": run_id, "taskId": task_id, "text": introspection})
-            await self.memory.observe_turn(run_id=run_id, user_text=user_input, assistant_text=introspection)
+            await self._ingest_memories(run_id=run_id, user_text=user_input, assistant_text=introspection)
             await self.tasks.set_status(task_id=task_id, status="open")
             yield create_event(EventType.RUN_FINAL, {"runId": run_id})
             return
@@ -228,7 +200,13 @@ class Runtime:
 
         try:
             assistant_text = ""
-            async for ev in self._stream_agent_loop_with_tools(run_id=run_id, model=model, messages=base_messages, tool_ctx=tool_ctx):
+            async for ev in self._stream_agent_loop_with_tools(
+                run_id=run_id,
+                model=model,
+                messages=base_messages,
+                tool_ctx=tool_ctx,
+                user_input=user_input,
+            ):
                 if ev.get("event") == EventType.RUN_TOKEN:
                     assistant_text += (ev.get("payload") or {}).get("content", "")
                 yield ev
@@ -239,12 +217,11 @@ class Runtime:
             return
 
         await self.event_log.append({"type": "run.output", "runId": run_id, "taskId": task_id, "text": assistant_text})
-        await self.memory.observe_turn(run_id=run_id, user_text=user_input, assistant_text=assistant_text)
-        mem_stats = await self._extract_and_store_memories(run_id=run_id, user_text=user_input, assistant_text=assistant_text)
-        if mem_stats.get("pinned_added") or mem_stats.get("structured_written"):
+        mem_stats = await self._ingest_memories(run_id=run_id, user_text=user_input, assistant_text=assistant_text)
+        if mem_stats.get("structured_written"):
             yield create_event(
                 EventType.RUN_LOG,
-                {"runId": run_id, "message": f"memory saved: pinned_added={mem_stats.get('pinned_added')} structured={mem_stats.get('structured_written')}"},
+                {"runId": run_id, "message": f"memory saved: structured={mem_stats.get('structured_written')}"},
             )
         await self.tasks.set_status(task_id=task_id, status="open")
 
@@ -266,7 +243,9 @@ class Runtime:
         system = (
             "You are Agent Blob, a helpful always-on master AI. Be concise and actionable.\n"
             "Never write to project files or run shell commands just to 'remember' something. Use the memory system instead.\n"
-            "For memory management, use memory_search/memory_list_recent to find items and memory_delete to remove them.\n"
+            "For memory management, use memory_search/memory_list_recent to inspect memories.\n"
+            "Only call memory_delete when the user explicitly asks to forget/remove/delete memory.\n"
+            "There is no direct memory-add tool; memory is saved automatically from conversation context.\n"
             "For file edits, prefer fs_glob/fs_grep/filesystem_read to locate the right file, then use edit_apply_patch for changes.\n"
             "Use filesystem_write primarily for creating new files or full overwrites; use edit_apply_patch for modifying existing files.\n"
             "For scheduling background jobs, use schedule_create_interval, schedule_list, and schedule_delete.\n"
@@ -308,49 +287,31 @@ class Runtime:
         msgs.append({"role": "user", "content": user_input})
         return msgs
 
-    def _parse_explicit_remember(self, user_input: str) -> Optional[str]:
+    async def _ingest_memories(self, *, run_id: str, user_text: str, assistant_text: str) -> dict:
         """
-        Parse a user request like:
-          "please remember: X"
-          "please remember X"
-        Returns X or None.
+        Best-effort memory ingestion. Never fails the run.
         """
-        s = (user_input or "").strip()
-        if not s:
-            return None
-        low = s.lower()
-        needle = "please remember"
-        if needle not in low:
-            return None
-        # Take the first occurrence and strip a leading ':' if present.
-        idx = low.find(needle)
-        tail = s[idx + len(needle) :].strip()
-        if tail.startswith(":"):
-            tail = tail[1:].strip()
-        return tail or None
-
-    async def _extract_and_store_memories(self, *, run_id: str, user_text: str, assistant_text: str) -> dict:
-        """
-        Best-effort memory extraction. Never fails the run.
-        Returns a small stats dict for optional logging.
-        """
-        stats = {"pinned_added": False, "structured_written": 0, "error": None}
         try:
-            if self._llm is None:
+            if self._llm is None and os.getenv("OPENAI_API_KEY"):
                 self._llm = OpenAIChatCompletionsProvider()
-            memories = await self.memory_extractor.extract(llm=self._llm, user_text=user_text, assistant_text=assistant_text)
-            if not memories:
-                await self.event_log.append({"type": "memory.extracted", "runId": run_id, "count": 0})
-                return stats
-            written = await self.memory.save_structured_memories(run_id=run_id, memories=memories)
-            stats["structured_written"] = written
-            # Update consolidated state (dedupe/merge) incrementally.
-            await self.memory.consolidate()
-            await self.event_log.append({"type": "memory.extracted", "runId": run_id, "count": written})
-        except Exception as e:
-            stats["error"] = str(e)
-            await self.event_log.append({"type": "memory.extract_error", "runId": run_id, "error": str(e)})
-        return stats
+            stats = await self.memory.ingest_turn(
+                run_id=run_id,
+                user_text=user_text,
+                assistant_text=assistant_text,
+                llm=self._llm,
+            )
+            await self.event_log.append(
+                {
+                    "type": "memory.ingested",
+                    "runId": run_id,
+                    "count": int(stats.get("structured_written", 0) or 0),
+                    "error": stats.get("error"),
+                }
+            )
+            return stats
+        except Exception as exc:
+            await self.event_log.append({"type": "memory.ingest_error", "runId": run_id, "error": str(exc)})
+            return {"structured_written": 0, "error": str(exc)}
 
     async def _stream_agent_loop_with_tools(
         self,
@@ -359,6 +320,7 @@ class Runtime:
         model: str,
         messages: List[Dict[str, Any]],
         tool_ctx: ToolContext,
+        user_input: str,
         max_rounds: int = 3,
     ) -> AsyncIterator[dict]:
         """
@@ -418,6 +380,9 @@ class Runtime:
                     args = json.loads(raw_args) if raw_args else {}
                 except Exception:
                     args = {}
+                args_exec = dict(args)
+                if tool_name in {"memory_search", "memory_list_recent", "memory_delete"}:
+                    args_exec["_run_id"] = run_id
 
                 try:
                     tool_def = self.tools.get(tool_name)
@@ -441,6 +406,20 @@ class Runtime:
                 missing = [k for k in required if k not in args]
                 if missing:
                     res = {"ok": False, "error": f"Missing required arguments: {missing}", "missing": missing}
+                    yield create_event(EventType.RUN_TOOL_RESULT, {"runId": run_id, "toolName": tool_name, **res})
+                    tool_results_msgs.append(
+                        {"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(res, ensure_ascii=False)}
+                    )
+                    continue
+
+                if tool_def.name == "memory_delete" and not self._has_memory_delete_intent(user_input):
+                    res = {
+                        "ok": False,
+                        "error": (
+                            "Blocked: memory.delete requires explicit user intent "
+                            "(e.g. 'forget/delete/remove this memory')."
+                        ),
+                    }
                     yield create_event(EventType.RUN_TOOL_RESULT, {"runId": run_id, "toolName": tool_name, **res})
                     tool_results_msgs.append(
                         {"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(res, ensure_ascii=False)}
@@ -472,9 +451,9 @@ class Runtime:
 
                 try:
                     if tool_def.name == "worker_run":
-                        res = await self._execute_worker_run(args=args, tool_ctx=tool_ctx)
+                        res = await self._execute_worker_run(args=args_exec, tool_ctx=tool_ctx)
                     else:
-                        result = await tool_def.executor(args)
+                        result = await tool_def.executor(args_exec)
                         res = {"ok": True, "result": result}
                 except Exception as e:
                     res = {"ok": False, "error": str(e)}
@@ -487,6 +466,26 @@ class Runtime:
             messages = messages + tool_results_msgs
 
         yield create_event(EventType.RUN_LOG, {"runId": run_id, "message": "Reached max tool-calling rounds."})
+
+    def _has_memory_delete_intent(self, user_input: str) -> bool:
+        q = (user_input or "").strip().lower()
+        if not q:
+            return False
+        action_words = ["forget", "delete", "remove", "erase", "drop"]
+        if not any(w in q for w in action_words):
+            return False
+        target_words = [
+            "memory",
+            "memories",
+            "remembered",
+            "remember",
+            "recall",
+            "what we talked",
+            "part about",
+            "that part",
+            "this part",
+        ]
+        return any(w in q for w in target_words)
 
     async def _execute_worker_run(self, *, args: Dict[str, Any], tool_ctx: ToolContext) -> Dict[str, Any]:
         worker_type = str(args.get("worker_type", "") or "").strip().lower()
@@ -643,6 +642,9 @@ class Runtime:
                     args = json.loads(raw_args) if raw_args else {}
                 except Exception:
                     args = {}
+                args_exec = dict(args)
+                if tool_name in {"memory_search", "memory_list_recent", "memory_delete"}:
+                    args_exec["_run_id"] = run_id
 
                 # Disallow nested delegation for now.
                 if tool_name == "worker_run":
@@ -684,7 +686,7 @@ class Runtime:
                 await self._enforce(tool_ctx, effective_capability, preview=preview, reason=f"Worker tool call: {effective_capability}")
 
                 try:
-                    result = await tool_def.executor(args)
+                    result = await tool_def.executor(args_exec)
                     res = {"ok": True, "result": result}
                 except Exception as e:
                     res = {"ok": False, "error": str(e)}
@@ -888,7 +890,7 @@ class Runtime:
 
         if wants_memory:
             pinned = await self.memory.get_pinned()
-            recent = await self.memory.list_recent_structured(limit=10)
+            recent = await self.memory.list_recent(limit=memory_introspection_limit())
             out.append(f"Pinned memory items: {len(pinned)}")
             for p in pinned[:10]:
                 if isinstance(p, dict):
@@ -903,13 +905,9 @@ class Runtime:
                 out.append("- (none)")
 
         if wants_memory_query and not wants_memory:
-            # For recall questions, actually search long-term memory (not just "recent").
-            try:
-                if self._llm is None and os.getenv("OPENAI_API_KEY"):
-                    self._llm = OpenAIChatCompletionsProvider()
-                results = await self.memory.search_structured_hybrid(query=user_input, limit=10, llm=self._llm)
-            except Exception:
-                results = await self.memory.search_structured(user_input, limit=10)
+            if self._llm is None and os.getenv("OPENAI_API_KEY"):
+                self._llm = OpenAIChatCompletionsProvider()
+            results = await self.memory.search(query=user_input, limit=memory_introspection_limit(), llm=self._llm)
             out.append("Memory search results:")
             if results:
                 for m in results[:10]:
