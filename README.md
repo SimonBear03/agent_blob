@@ -7,6 +7,7 @@ Always-on gateway + runtime (“master AI”) with:
 - LLM tool-calling (filesystem/shell) with interactive confirmations
 - MCP capabilities (Streamable HTTP)
 - Interactive confirmations (Claude Code–style allow/ask/deny policy)
+- Telegram DM client (polling mode, optional)
 
 ## Quick start
 
@@ -26,6 +27,7 @@ python3 scripts/cli.py
 Notes:
 - `run_gateway.py` is not a global command; run it as `python3 scripts/run_gateway.py` (or `scripts/run_gateway.py`).
 - Same for the CLI: `python3 scripts/cli.py` (or `scripts/cli.py`).
+- Telegram client runs inside the gateway process when enabled.
 
 Default endpoints:
 - WebSocket: `ws://127.0.0.1:3336/ws`
@@ -37,12 +39,15 @@ agent_blob/
   gateway/        # networking, runs, permissions, event streaming
   runtime/        # agent loop, memory, tasks, capabilities
   policy/         # allow/ask/deny rules + matching
-  clients/        # client implementations (CLI now; more later)
+  frontends/
+    native/       # first-party clients using Agent Blob protocol (CLI now)
+    adapters/     # external platform adapters (Telegram now)
 scripts/
   run_gateway.py  # start server
-  cli.py          # CLI entrypoint (implementation lives in agent_blob/clients/cli/)
+  cli.py          # CLI entrypoint (implementation lives in agent_blob/frontends/native/cli/)
   mcp_example_server.py  # local MCP test server (optional)
-data/             # JSONL event log + memory + tasks (created at runtime)
+data/             # tasks/schedules/adapter state (created at runtime)
+memory/           # canonical memory + event history (created at runtime)
 agent_blob.json   # policy + data dir config
 ```
 
@@ -52,11 +57,59 @@ agent_blob.json   # policy + data dir config
 - Interactive approvals are **not persisted by default** (`permissions.remember: false`).
 - **Filesystem tool root** is controlled by `agent_blob.json` at `tools.allowed_fs_root` (defaults to current working directory).
 - **Supervisor** emits only on change by default. Configure via `agent_blob.json` at `supervisor.interval_s`, `supervisor.debug`, and `supervisor.maintenance_interval_s`.
-- **Memory** writes: `data/pinned.json` (always loaded), `data/memories.jsonl` (structured candidates/audit), `data/agent_blob.sqlite` (consolidated memory state + BM25 + embeddings).
-- **events.jsonl** is the canonical log; recent turns + episodic recall are derived from it (not from a separate “session” store).
+- **Memory** writes: `memory/pinned.json` (always loaded) and `memory/agent_blob.sqlite` (canonical long-term memory + BM25 + embeddings).
+- **events.jsonl** is canonical run history at `memory/events.jsonl`; recent turns + episodic recall are derived from it.
 - **Skills**: local `SKILL.md` files in `skills/` (and any other dirs configured in `agent_blob.json`) are injected as enabled skills and can be listed/read via `skills_list`/`skills_get`.
 - **MCP**: `agent_blob/runtime/mcp/` implements MCP Streamable HTTP. Configure servers in `agent_blob.json` under `mcp.servers`, then use `mcp_list_tools` + `mcp_call` (or `mcp_refresh`).
 - **Web fetch**: `web_fetch` can fetch URLs for summarization/research (permission-gated).
+- **Channel routing policy**: no broadcast by default. Replies go back to the origin client/channel only (CLI input -> CLI output, Telegram input -> Telegram output).
+
+## Telegram (DM only)
+
+Set secrets in `.env`:
+
+```bash
+TELEGRAM_BOT_TOKEN=...
+```
+
+Enable adapter in `agent_blob.json`:
+
+```json
+{
+  "frontends": {
+    "adapters": {
+      "telegram": {
+        "enabled": true,
+        "mode": "polling",
+        "poll_interval_s": 1.5,
+        "stream_edit_interval_ms": 700,
+        "status_verbosity": "minimal",
+        "max_message_chars": 3800,
+        "media": {
+          "enabled": true,
+          "download": true,
+          "max_file_mb": 25,
+          "download_dir": "./data/media/telegram"
+        }
+      }
+    }
+  }
+}
+```
+
+Run gateway:
+
+```bash
+python3 scripts/run_gateway.py
+```
+
+Then DM your bot directly in Telegram.
+
+Telegram behavior:
+- DM text creates a runtime run through the same gateway/runtime path as CLI.
+- Replies stream back to Telegram only (no cross-channel mirror).
+- Permission requests show Allow/Deny inline buttons.
+- Media (photo/document/voice) is accepted and attached as metadata in the run input.
 
 ## MCP (how to test)
 
@@ -117,16 +170,17 @@ Example prompt to the agent:
 
 ## Data folder
 
-Agent Blob keeps an append-only audit trail plus small “current state” snapshots in `data/`.
+Agent Blob keeps operational state in `data/` and memory/history in `memory/`.
 
-- `data/events.jsonl`: canonical event log (rotated/pruned by log rotation policy).
 - `data/tasks.json`: current task snapshot (purged by retention policy).
 - `data/tasks_events.jsonl`: task history/audit (rotated/pruned by log rotation policy).
 - `data/schedules.json`: schedule definitions (not purged).
-- `data/pinned.json`: pinned memory (not automatically purged).
-- `data/memories.jsonl`: extracted structured memory candidates (rotated/pruned by log rotation policy).
-- `data/agent_blob.sqlite`: consolidated/deduped structured memory (SQLite + FTS5 + embeddings).
-- `data/archives/`: rotated JSONL logs + `index.json` (simple archive index).
+- `data/telegram_offset.json`: Telegram adapter cursor state.
+- `memory/events.jsonl`: canonical event log (rotated/pruned by log rotation policy).
+- `memory/memory_events.jsonl`: memory audit log (`added` / `modified` / `removed`).
+- `memory/pinned.json`: pinned memory (not automatically purged).
+- `memory/agent_blob.sqlite`: consolidated/deduped structured memory (SQLite + FTS5 + embeddings).
+- `memory/archives/`: rotated memory event logs.
 
 ### Retention policy
 
@@ -141,10 +195,10 @@ Supervisor maintenance runs while the gateway is running, every `supervisor.main
 
 ### Log rotation
 
-JSONL logs are rotated and archived under `data/archives/` when they exceed configured size thresholds:
-- `logs.events` controls `data/events.jsonl`
+JSONL logs are rotated and archived when they exceed configured size thresholds:
+- `logs.events` controls `memory/events.jsonl`
+- `logs.memory_events` controls `memory/memory_events.jsonl`
 - `logs.tasks_events` controls `data/tasks_events.jsonl`
-- `logs.memories` controls `data/memories.jsonl`
 
 Each log type supports:
 - `max_bytes`: rotate when the active file exceeds this size (0 disables rotation)
@@ -153,16 +207,29 @@ Each log type supports:
 
 ### Memory retrieval
 
-Structured long-term memory retrieval is backed by `data/agent_blob.sqlite`:
-- **Lexical search**: SQLite FTS5 (BM25)
-- **Vector search**: OpenAI embeddings stored as float32 blobs (no SQLite extension required). Candidate generation scans the most recent embedded items (bounded), then unions with BM25 candidates.
+Memory uses bounded retrieval, not full-history replay:
+- `memory/events.jsonl` is canonical run history.
+- `memory/agent_blob.sqlite` stores canonical long-term memory items.
+- `memory/pinned.json` stores small always-load memory.
 
-Embedding behavior is controlled by `agent_blob.json` under `memory`:
-- `memory.embedding_model` (default `text-embedding-3-small`)
-- `memory.embeddings.enabled` (default `true`)
-- `memory.embeddings.batch_size` (default `16`) — refreshed during supervisor maintenance
-- `memory.embeddings.vector_scan_limit` (default `2000`) — how many recent embedded items to scan for vector candidates
-- `memory.embeddings.vector_top_k` (default `50`) — number of vector candidates to union with BM25 candidates
+Each run injects:
+- pinned memory,
+- recent turns (bounded),
+- related turns (bounded),
+- top-K long-term memory hits (hybrid BM25 + vectors).
+
+Memory behavior is controlled by `agent_blob.json` under `memory`:
+- `memory.dir` (default `./memory`)
+- `memory.importance_min`
+- `memory.retrieval.recent_turns_limit`
+- `memory.retrieval.related_turns_limit`
+- `memory.retrieval.structured_limit`
+- `memory.retrieval.introspection_limit`
+- `memory.embedding_model`
+- `memory.embeddings.enabled`
+- `memory.embeddings.batch_size`
+- `memory.embeddings.vector_scan_limit`
+- `memory.embeddings.vector_top_k`
 
 ### Memory management tools
 
@@ -197,6 +264,17 @@ The agent can manage structured memories without using the shell:
    - Ask: “In `tmp/test.txt`, change `hello` to `hello!`.”
    - Confirm the agent uses `edit_apply_patch` and you see a diff preview.
 
+4) **Memory V3 ingest + recall**
+   - Ask: “We decided that Telegram should be an adapter frontend. Please remember this.”
+   - Ask: “What do you remember about Telegram frontend design?”
+   - Confirm the answer is grounded in stored memory and not full-history replay.
+
+5) **Memory delete guardrail**
+   - Ask: “Add a memory that X is true.”
+   - Confirm the agent does not call `memory_delete`.
+   - Ask explicitly: “Forget the memory about X.”
+   - Confirm `memory_delete` is requested and permission-gated.
+
 4) **MCP**
    - Start `python3 scripts/mcp_example_server.py --port 9000`.
    - Add the server to `agent_blob.json` and restart gateway.
@@ -227,3 +305,10 @@ Bundled example skills live under `agent_blob/runtime/skills/examples/`. Your ow
    - Confirm the final answer includes the worker result and you saw tool calls under a `run_worker_*` run id.
    - Ask: “Any workers active right now?”
    - Confirm it reports active workers (or none).
+
+8) **Telegram DM**
+   - Enable telegram in `agent_blob.json` and set `TELEGRAM_BOT_TOKEN`.
+   - Run `python3 scripts/run_gateway.py`.
+   - Send a DM text to the bot; confirm you receive streamed response in Telegram.
+   - Trigger a permissioned action; confirm inline Allow/Deny appears and works.
+   - Send a photo/document/voice; confirm run is accepted (attachment metadata included).

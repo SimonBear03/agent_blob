@@ -153,6 +153,39 @@ class MemoryDB:
         con.commit()
         return cur.rowcount > 0
 
+    def get_by_fingerprint(self, fingerprint: str) -> Optional[Dict[str, Any]]:
+        fp = str(fingerprint or "").strip()
+        if not fp:
+            return None
+        con = self._connect()
+        cur = con.execute(
+            """
+            SELECT fingerprint, type, content, context, importance, tags_json, first_seen_ms, last_seen_ms, count, last_run_id
+            FROM memory_items
+            WHERE fingerprint = ?
+            """,
+            (fp,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        try:
+            tags = json.loads(row["tags_json"] or "[]")
+        except Exception:
+            tags = []
+        return {
+            "id": str(row["fingerprint"]),
+            "type": str(row["type"]),
+            "content": str(row["content"]),
+            "context": str(row["context"]),
+            "importance": int(row["importance"] or 0),
+            "tags": list(tags or []),
+            "first_seen_ms": int(row["first_seen_ms"] or 0),
+            "last_seen_ms": int(row["last_seen_ms"] or 0),
+            "count": int(row["count"] or 0),
+            "last_run_id": str(row["last_run_id"] or ""),
+        }
+
     def list_recent(self, limit: int = 20) -> List[Dict[str, Any]]:
         con = self._connect()
         cur = con.execute(
@@ -189,12 +222,22 @@ class MemoryDB:
         Upsert (dedup) extracted memories into memory_items.
         Returns number of rows inserted or updated.
         """
+        detail = self.upsert_many_detailed(run_id=run_id, memories=memories)
+        return int(detail.get("touched", 0))
+
+    def upsert_many_detailed(self, *, run_id: str, memories: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Upsert (dedup) extracted memories into memory_items.
+        Returns detailed actions for audit logging.
+        """
         if not memories:
-            return 0
+            return {"touched": 0, "added": [], "modified": []}
 
         con = self._connect()
         now_ms = int(time.time() * 1000)
         touched = 0
+        added: List[Dict[str, Any]] = []
+        modified: List[Dict[str, Any]] = []
 
         for m in memories:
             mem_type = str(m.get("type", "") or "").strip()
@@ -209,7 +252,7 @@ class MemoryDB:
 
             # Insert or update.
             # If content/context/tags/type changes, embedding is marked dirty.
-            cur = con.execute("SELECT rowid, type, content, context, tags_json FROM memory_items WHERE fingerprint = ?", (fp,))
+            cur = con.execute("SELECT rowid, type, content, context, tags_json, importance FROM memory_items WHERE fingerprint = ?", (fp,))
             row = cur.fetchone()
             if row is None:
                 con.execute(
@@ -222,6 +265,15 @@ class MemoryDB:
                     (fp, mem_type, content, context, importance, tags_json, now_ms, now_ms, run_id),
                 )
                 touched += 1
+                added.append(
+                    {
+                        "id": fp,
+                        "type": mem_type,
+                        "content": content,
+                        "importance": importance,
+                        "tags": list(sorted({str(t) for t in tags if str(t).strip()})),
+                    }
+                )
             else:
                 existing_changed = (
                     str(row["type"]) != mem_type
@@ -243,6 +295,14 @@ class MemoryDB:
                 except Exception:
                     new_tags = set()
                 merged_tags_json = json.dumps(sorted(old_tags | new_tags), ensure_ascii=False)
+                old_importance = int(row["importance"] or 0) if "importance" in row.keys() else 0
+                new_importance = old_importance if old_importance > importance else importance
+                is_modified = (
+                    existing_changed
+                    or (merged_ctx != old_ctx)
+                    or (merged_tags_json != str(row["tags_json"] or "[]"))
+                    or (new_importance != old_importance)
+                )
 
                 con.execute(
                     """
@@ -263,9 +323,19 @@ class MemoryDB:
                     (now_ms, importance, importance, merged_ctx, merged_tags_json, run_id, 1 if existing_changed else 0, fp),
                 )
                 touched += 1
+                if is_modified:
+                    modified.append(
+                        {
+                            "id": fp,
+                            "type": mem_type,
+                            "content": content,
+                            "importance": new_importance,
+                            "tags": list(sorted(old_tags | new_tags)),
+                        }
+                    )
 
         con.commit()
-        return touched
+        return {"touched": touched, "added": added, "modified": modified}
 
     def fetch_by_rowids(self, rowids: List[int]) -> List[Dict[str, Any]]:
         # Not used by the runtime currently; keep as a simple helper.

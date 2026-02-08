@@ -5,17 +5,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from collections import deque
 
-from .paths import data_dir
+from .paths import data_dir, memory_dir
 from .jsonl_archive import rotate_jsonl, prune_archives
 from agent_blob import config
 
 
 class EventLog:
     def __init__(self):
-        self._data_dir = data_dir()
-        self._path = self._data_dir / "events.jsonl"
+        self._memory_dir = memory_dir()
+        self._legacy_data_dir = data_dir()
+        self._path = self._memory_dir / "events.jsonl"
 
     async def startup(self) -> None:
+        self._migrate_legacy_events()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         if not self._path.exists():
             self._path.write_text("", encoding="utf-8")
@@ -27,13 +29,13 @@ class EventLog:
 
     async def rotate_and_prune(self) -> Dict[str, Any]:
         rec = rotate_jsonl(
-            data_dir=self._data_dir,
+            data_dir=self._memory_dir,
             kind="events",
             active_path=self._path,
             max_bytes=config.log_max_bytes("events", 20_000_000),
         )
         pruned = prune_archives(
-            data_dir=self._data_dir,
+            data_dir=self._memory_dir,
             kind="events",
             keep_days=config.log_keep_days("events", 14),
             keep_max_files=config.log_keep_max_files("events", 50),
@@ -124,7 +126,7 @@ class EventLog:
             return []
 
         files: List[Path] = []
-        arch = (self._data_dir / "archives")
+        arch = (self._memory_dir / "archives")
         if arch.exists():
             candidates = sorted(arch.glob("events_*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
             recent = candidates[:5]  # cap: search up to 5 recent archives
@@ -141,6 +143,29 @@ class EventLog:
             if remaining <= 0:
                 break
         return list(out)[-max_lines:]
+
+    def _migrate_legacy_events(self) -> None:
+        legacy_events = self._legacy_data_dir / "events.jsonl"
+        if legacy_events.exists() and (not self._path.exists()):
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                legacy_events.replace(self._path)
+            except Exception:
+                pass
+
+        legacy_archives = self._legacy_data_dir / "archives"
+        target_archives = self._memory_dir / "archives"
+        if not legacy_archives.exists():
+            return
+        target_archives.mkdir(parents=True, exist_ok=True)
+        for src in legacy_archives.glob("events_*.jsonl"):
+            dst = target_archives / src.name
+            if dst.exists():
+                continue
+            try:
+                src.replace(dst)
+            except Exception:
+                continue
 
 
 def _tail_lines(path: Path, max_lines: int, block_size: int = 64 * 1024) -> List[str]:

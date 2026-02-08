@@ -1,4 +1,3 @@
-from .extractor import MemoryExtractor
+from .service import MemoryService
 
-__all__ = ["MemoryExtractor"]
-
+__all__ = ["MemoryService"]

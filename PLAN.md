@@ -1,19 +1,20 @@
 # Agent Blob V3 Plan
 
 ## Objective
-Ship V3 as a reliable, always-on master AI that can:
-- handle concurrent user/background work without context confusion,
-- run scheduled jobs predictably,
-- delegate to sub-agents/workers by role,
-- use MCP/skills safely,
-- and be operated as a long-running service.
+Ship V3 as a reliable, always-on master AI with a modular architecture:
+- gateway = control plane,
+- runtime = execution plane,
+- frontends = native/adapters,
+- memory = pluggable subsystem with bounded context injection.
+
+The V3 memory target is a full replacement of V2 memory flow (no candidate `memories.jsonl` pipeline).
 
 ## V3 Product Boundaries
 ### In Scope
 - Runtime reliability and task lifecycle hardening.
 - Strong scheduling semantics (interval + cron + daily) with deterministic execution.
 - Worker orchestration (spawn, monitor, result reporting).
-- Better memory retrieval quality and control.
+- Memory V3 replacement (modular, bounded, low-hardcode behavior).
 - Gateway resiliency (disconnect/reconnect safety, permission queue robustness).
 - Ops baseline (health, logs, recovery behavior).
 
@@ -22,29 +23,52 @@ Ship V3 as a reliable, always-on master AI that can:
 - Full web UI.
 - Quant backend implementation itself (kept as external MCP/service).
 
-## Current Baseline (V2)
+## Current Baseline
 - Gateway + runtime split exists.
 - Tool calling with permission gating exists.
 - Scheduler exists.
 - MCP and skills are integrated.
-- Structured memory with SQLite + FTS + embeddings exists.
-- Main gaps are reliability, deterministic scheduling behavior, cancellation/control plane, and operational hardening.
+- Frontend layout is moving to `frontends/native` + `frontends/adapters`.
+- Memory V2 had mixed behavior (event recall + extractor + candidate logs + runtime heuristics).
 
 ## V3 Success Criteria
 V3 is done when all are true:
 1. Scheduled tasks execute consistently and predictably across restarts.
 2. Background runs never silently disappear; state is queryable.
 3. Worker delegation is visible and manageable (active/finished/failed).
-4. Memory recall quality is measurably better on long conversations.
+4. Memory recall quality is stable on long conversations with bounded token usage.
 5. Gateway/runtime recover cleanly from client disconnects and transient failures.
 6. Core flows are covered by automated tests.
 
-## Architecture Decisions for V3
+## Architecture Decisions
 1. Keep single-user model for now.
 2. Keep one master timeline UX (no user-facing session switching).
 3. Keep gateway as control plane and runtime as execution plane (same process now, separable later).
 4. Keep policy-driven approvals (`deny > ask > allow`) with explicit capability classes.
-5. Keep event log canonical; derived indexes remain replaceable.
+5. Keep event log canonical; retrieval indexes are derived and replaceable.
+
+## Memory V3 (Canonical Workflow)
+### Source of Truth
+- `events.jsonl` remains canonical run history.
+- `agent_blob.sqlite` (`memory_items`) is canonical long-term memory state.
+- `pinned.json` is small always-load memory.
+
+### Capture -> Consolidate -> Retrieve -> Inject
+1. **Capture**: runtime appends run events (`run.input`, `run.output`).
+2. **Extract**: after each completed turn, extractor derives durable memory items.
+3. **Consolidate**: extracted items are upserted into SQLite with dedup/merge.
+4. **Index**: FTS + embeddings are maintained as derived indexes in SQLite rows.
+5. **Retrieve**: each run fetches bounded memory packet:
+   - pinned memories,
+   - recent turns,
+   - related turns,
+   - top-K long-term memories (hybrid lexical + vector).
+6. **Inject**: runtime adds only bounded packet to model prompt.
+
+### Explicit Non-Goals
+- No full-history prompt replay.
+- No candidate-memory log as a required runtime dependency.
+- No hardcoded "remember" write path in runtime.
 
 ## Workstreams
 
@@ -82,16 +106,17 @@ V3 is done when all are true:
 - User can ask "what workers are active?" and receive accurate status.
 - Worker failures are surfaced with actionable error details.
 
-## 4) Memory Quality
+## 4) Memory V3 Replacement
 ### Deliverables
-- Tighten memory extraction policy (avoid low-value duplicates).
-- Add secondary dedup pass before insert/upsert (semantic + normalized text).
-- Improve retrieval ranking weights with configurable profile.
-- Add explicit memory controls (`forget`, `pin`, `list`, `search`) with stable behavior.
+- Remove V2 candidate-memory dependency from active runtime path.
+- Route all memory retrieval through one service interface.
+- Keep retrieval limits and scoring knobs configurable in `agent_blob.json`.
+- Keep memory tools deterministic (`search`, `list`, `delete`, `pin` where enabled).
 
 ### Acceptance
-- Reduced duplicate memory rows on repeated recall prompts.
-- Better long-horizon recall in manual regression scenarios.
+- Memory retrieval works without `memories.jsonl`.
+- Repeated recall prompts do not create uncontrolled duplicate churn.
+- Prompt memory packet is bounded and auditable.
 
 ## 5) MCP & Skills Productionization
 ### Deliverables
@@ -120,28 +145,28 @@ V3 is done when all are true:
 - Core regression suite passes locally.
 - README + V3 docs fully match implementation.
 
-## Proposed Milestones
+## Milestones
 ### M1: Runtime Control Stability
 - `run.cancel`, websocket safety, permission queue correctness.
 
 ### M2: Scheduler + Workers Stability
 - deterministic scheduler behavior and worker lifecycle visibility.
 
-### M3: Memory Quality Upgrade
-- dedup improvements, ranking polish, memory controls.
+### M3: Memory V3 Cutover
+- new memory service in runtime path, bounded retrieval, no candidate-log dependency.
 
 ### M4: MCP/Skills Hardening + Tests
 - robustness improvements + regression suite + docs finalization.
 
-## Suggested File-Level Targets
+## File-Level Targets
 - Gateway: `agent_blob/gateway/app.py`
 - Runtime loop: `agent_blob/runtime/runtime.py`
 - Scheduler: `agent_blob/runtime/storage/scheduler.py`
 - Tasks: `agent_blob/runtime/storage/tasks.py`
-- Memory DB/store: `agent_blob/runtime/storage/memory_db.py`, `agent_blob/runtime/storage/memory_store.py`
+- Memory: `agent_blob/runtime/memory/*`, `agent_blob/runtime/storage/memory_db.py`
 - Capability providers: `agent_blob/runtime/providers/*.py`
-- CLI reliability UX: `agent_blob/clients/cli/main.py`
-- Docs: `README.md`, `V3_PLAN.md`
+- Frontends: `agent_blob/frontends/*`
+- Docs: `README.md`, `PLAN.md`
 
 ## Risk Register
 1. LLM non-determinism can still cause schedule/worker drift.
@@ -150,6 +175,8 @@ V3 is done when all are true:
    - Mitigation: strict retention, archive pruning, worker/task caps, health checks.
 3. Permission deadlocks when no client is connected.
    - Mitigation: pending permission queue + expiration policy + explicit status visibility.
+4. Memory extraction quality drift.
+   - Mitigation: extractor prompt tests + conservative thresholds + explicit deletion tools.
 
 ## Immediate Next Step
-Start M1 first: implement `run.cancel` + websocket-safe run streaming guardrails, then lock this behavior with tests.
+Finish M3 cutover by removing remaining V2 memory artifacts from docs/config/runtime compatibility shims, then lock behavior with tests.

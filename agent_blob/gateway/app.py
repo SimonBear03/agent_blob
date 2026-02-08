@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Awaitable, Callable, Dict
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -14,6 +14,7 @@ from agent_blob.protocol import EventType, create_event, create_response
 from agent_blob.policy.policy import Policy
 from agent_blob.runtime.runtime import Runtime
 from agent_blob import config
+from agent_blob.frontends.adapters.manager import start_enabled_adapters
 
 load_dotenv()
 
@@ -39,20 +40,27 @@ class Gateway:
         self._pending_permission_events: Dict[str, Dict[str, Any]] = {}
         self._seq = 0
         self._supervisor_task: asyncio.Task | None = None
+        self._adapter_tasks: list[asyncio.Task] = []
 
     async def startup(self):
         await self.runtime.startup()
         self._supervisor_task = asyncio.create_task(self._supervisor_loop())
+        self._adapter_tasks = await start_enabled_adapters(gateway=self)
 
     def _next_seq(self) -> int:
         self._seq += 1
         return self._seq
 
+    def _with_seq(self, event: dict) -> dict:
+        out = dict(event)
+        if out.get("type") == "event" and out.get("seq") is None:
+            out["seq"] = self._next_seq()
+        return out
+
     async def _send_event(self, websocket: WebSocket, event: dict):
-        if event.get("type") == "event" and event.get("seq") is None:
-            event["seq"] = self._next_seq()
+        payload = self._with_seq(event)
         try:
-            await websocket.send_json(event)
+            await websocket.send_json(payload)
         except Exception as e:
             # Client likely disconnected; ensure we stop treating it as active.
             self.clients.pop(websocket, None)
@@ -61,9 +69,14 @@ class Gateway:
     async def _broadcast_event(self, event: dict):
         for ws in list(self.clients.keys()):
             try:
-                await self._send_event(ws, event.copy())
+                await self._send_event(ws, event)
             except Exception:
                 self.clients.pop(ws, None)
+
+    def _ws_sender(self, websocket: WebSocket) -> Callable[[dict], Awaitable[None]]:
+        async def _send(ev: dict) -> None:
+            await self._send_event(websocket, ev)
+        return _send
 
     async def _ask_permission_broadcast(
         self,
@@ -162,18 +175,13 @@ class Gateway:
                             await self.runtime.schedules.set_last_run_id(schedule_id=sched_id, run_id=run_id)
                         except Exception:
                             pass
-                        await self._broadcast_event(create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "running"}))
-                        try:
-                            scheduled_input = f"[scheduled:{sched_id}] {user_input}".strip()
-                            async for ev in self.runtime.run(
-                                run_id=run_id,
-                                user_input=scheduled_input,
-                                policy=self.policy,
-                                ask_permission=lambda **kwargs: self._ask_permission_broadcast(**kwargs),
-                            ):
-                                await self._broadcast_event(ev)
-                        except Exception as e:
-                            await self._broadcast_event(create_event(EventType.RUN_ERROR, {"runId": run_id, "message": str(e)}))
+                        scheduled_input = f"[scheduled:{sched_id}] {user_input}".strip()
+                        await self.start_run(
+                            run_id=run_id,
+                            user_input=scheduled_input,
+                            send_event=self._broadcast_event,
+                            ask_permission=lambda **kwargs: self._ask_permission_broadcast(**kwargs),
+                        )
 
                     asyncio.create_task(_sched_runner(run_id, user_input, title, sched_id))
             except Exception as e:
@@ -218,6 +226,64 @@ class Gateway:
         finally:
             self._permission_waiters.pop(request_id, None)
 
+    async def start_run(
+        self,
+        *,
+        run_id: str,
+        user_input: str,
+        send_event: Callable[[dict], Awaitable[None]],
+        ask_permission: Callable[..., Awaitable[str]],
+    ) -> asyncio.Task:
+        async def _runner() -> None:
+            try:
+                await send_event(create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "running"}))
+            except Exception:
+                return
+            try:
+                async for ev in self.runtime.run(
+                    run_id=run_id,
+                    user_input=user_input,
+                    policy=self.policy,
+                    ask_permission=ask_permission,
+                ):
+                    try:
+                        await send_event(ev)
+                    except Exception:
+                        return
+            except Exception as e:
+                try:
+                    await send_event(create_event(EventType.RUN_ERROR, {"runId": run_id, "message": str(e)}))
+                except Exception:
+                    return
+
+        return asyncio.create_task(_runner())
+
+    async def handle_telegram_run_create(
+        self,
+        *,
+        user_input: str,
+        send_event: Callable[[dict], Awaitable[None]],
+        ask_permission: Callable[..., Awaitable[str]],
+    ) -> str:
+        run_id = f"run_{uuid4().hex[:12]}"
+        await self.start_run(
+            run_id=run_id,
+            user_input=user_input,
+            send_event=send_event,
+            ask_permission=ask_permission,
+        )
+        return run_id
+
+    async def _persist_permission_if_needed(self, *, decision: str, remember: bool, capability: Any) -> None:
+        cfg = config.load_config_uncached()
+        remember_enabled = bool(((cfg.get("permissions") or {}).get("remember")) if isinstance(cfg, dict) else False)
+        if remember_enabled and remember and isinstance(capability, str) and capability:
+            try:
+                Policy.persist_decision(capability=capability, decision=decision)
+                self.policy = Policy.load()
+            except Exception:
+                pass
+
     async def handle_permission_respond(self, websocket: WebSocket, req: dict):
         params = (req.get("params") or {})
         request_id = params.get("requestId", "")
@@ -228,15 +294,7 @@ class Gateway:
         if fut and not fut.done():
             fut.set_result(decision)
             self._pending_permission_events.pop(request_id, None)
-            # Optional persistence of interactive approvals (disabled by default).
-            cfg = config.load_config_uncached()
-            remember_enabled = bool(((cfg.get("permissions") or {}).get("remember")) if isinstance(cfg, dict) else False)
-            if remember_enabled and remember and isinstance(capability, str) and capability:
-                try:
-                    Policy.persist_decision(capability=capability, decision=decision)
-                    self.policy = Policy.load()
-                except Exception:
-                    pass
+            await self._persist_permission_if_needed(decision=decision, remember=remember, capability=capability)
             await websocket.send_json(create_response(req.get("id", "unknown"), ok=True, payload={"requestId": request_id}))
             return
         await websocket.send_json(create_response(req.get("id", "unknown"), ok=False, error="Unknown or expired permission request"))
@@ -247,34 +305,12 @@ class Gateway:
         user_input = params.get("input", "")
 
         await websocket.send_json(create_response(req.get("id", "unknown"), ok=True, payload={"runId": run_id, "status": "accepted"}))
-
-        async def _runner():
-            try:
-                await self._send_event(websocket, create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "running"}))
-            except Exception:
-                return
-            try:
-                async for ev in self.runtime.run(
-                    run_id=run_id,
-                    user_input=user_input,
-                    policy=self.policy,
-                    ask_permission=lambda **kwargs: self.ask_permission(websocket, **kwargs),
-                ):
-                    try:
-                        await self._send_event(websocket, ev)
-                    except Exception:
-                        # Client disconnected; stop streaming this run.
-                        return
-            except Exception as e:
-                try:
-                    await self._send_event(
-                        websocket,
-                        create_event(EventType.RUN_ERROR, {"runId": run_id, "message": str(e)}),
-                    )
-                except Exception:
-                    return
-
-        asyncio.create_task(_runner())
+        await self.start_run(
+            run_id=run_id,
+            user_input=user_input,
+            send_event=self._ws_sender(websocket),
+            ask_permission=lambda **kwargs: self.ask_permission(websocket, **kwargs),
+        )
 
 
 def create_app() -> FastAPI:
