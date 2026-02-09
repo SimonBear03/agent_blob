@@ -41,6 +41,9 @@ class Gateway:
         self._seq = 0
         self._supervisor_task: asyncio.Task | None = None
         self._adapter_tasks: list[asyncio.Task] = []
+        self._run_tasks: Dict[str, asyncio.Task] = {}
+        self._run_owner: Dict[str, str] = {}
+        self._runs_by_owner: Dict[str, list[str]] = {}
 
     async def startup(self):
         await self.runtime.startup()
@@ -77,6 +80,12 @@ class Gateway:
         async def _send(ev: dict) -> None:
             await self._send_event(websocket, ev)
         return _send
+
+    def _owner_key_for_websocket(self, websocket: WebSocket) -> str:
+        client = self.clients.get(websocket)
+        if client is None:
+            return "unknown"
+        return f"{client.client_type}:{client.device_id}"
 
     async def _ask_permission_broadcast(
         self,
@@ -128,7 +137,7 @@ class Gateway:
                 active = []
                 for t in tasks:
                     status = str(t.get("status") or "")
-                    if status in ("done", "cancelled", "failed"):
+                    if status in ("done", "stopped", "failed"):
                         continue
                     updated = float(t.get("updated_at", 0) or 0)
                     if status in always_active or (now - updated) <= window_s:
@@ -181,6 +190,7 @@ class Gateway:
                             user_input=scheduled_input,
                             send_event=self._broadcast_event,
                             ask_permission=lambda **kwargs: self._ask_permission_broadcast(**kwargs),
+                            owner_key="system:scheduler",
                         )
 
                     asyncio.create_task(_sched_runner(run_id, user_input, title, sched_id))
@@ -233,7 +243,13 @@ class Gateway:
         user_input: str,
         send_event: Callable[[dict], Awaitable[None]],
         ask_permission: Callable[..., Awaitable[str]],
+        owner_key: str,
     ) -> asyncio.Task:
+        self._run_owner[run_id] = owner_key
+        owner_runs = self._runs_by_owner.setdefault(owner_key, [])
+        if run_id not in owner_runs:
+            owner_runs.append(run_id)
+
         async def _runner() -> None:
             try:
                 await send_event(create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "running"}))
@@ -250,13 +266,61 @@ class Gateway:
                         await send_event(ev)
                     except Exception:
                         return
+            except asyncio.CancelledError:
+                try:
+                    await self.runtime.tasks.set_status_by_run(run_id=run_id, status="stopped")
+                    await send_event(create_event(EventType.RUN_STATUS, {"runId": run_id, "status": "stopped"}))
+                    await send_event(create_event(EventType.RUN_FINAL, {"runId": run_id, "status": "stopped"}))
+                except Exception:
+                    pass
+                raise
             except Exception as e:
                 try:
                     await send_event(create_event(EventType.RUN_ERROR, {"runId": run_id, "message": str(e)}))
                 except Exception:
                     return
+            finally:
+                self._run_tasks.pop(run_id, None)
+                owner = self._run_owner.pop(run_id, "")
+                if owner:
+                    runs = self._runs_by_owner.get(owner, [])
+                    if run_id in runs:
+                        runs.remove(run_id)
+                    if not runs:
+                        self._runs_by_owner.pop(owner, None)
 
-        return asyncio.create_task(_runner())
+        task = asyncio.create_task(_runner())
+        self._run_tasks[run_id] = task
+        return task
+
+    def _stop_run_task(self, *, run_id: str) -> str:
+        task = self._run_tasks.get(run_id)
+        if task is None:
+            return "unknown"
+        if task.done():
+            return "already_done"
+        # Resolve pending permission requests for this run as denied.
+        for request_id, item in list(self._pending_permission_events.items()):
+            if str((item or {}).get("runId", "") or "") != run_id:
+                continue
+            fut = self._permission_waiters.get(request_id)
+            if fut and not fut.done():
+                fut.set_result("deny")
+            self._pending_permission_events.pop(request_id, None)
+        task.cancel()
+        return "stopping"
+
+    async def stop_latest_for_owner(self, *, owner_key: str) -> str | None:
+        run_id = ""
+        for candidate in reversed(self._runs_by_owner.get(owner_key, [])):
+            task = self._run_tasks.get(candidate)
+            if task is not None and not task.done():
+                run_id = candidate
+                break
+        if not run_id:
+            return None
+        status = self._stop_run_task(run_id=run_id)
+        return run_id if status in {"stopping", "already_done"} else None
 
     async def handle_telegram_run_create(
         self,
@@ -264,6 +328,7 @@ class Gateway:
         user_input: str,
         send_event: Callable[[dict], Awaitable[None]],
         ask_permission: Callable[..., Awaitable[str]],
+        owner_key: str = "adapter:telegram",
     ) -> str:
         run_id = f"run_{uuid4().hex[:12]}"
         await self.start_run(
@@ -271,6 +336,7 @@ class Gateway:
             user_input=user_input,
             send_event=send_event,
             ask_permission=ask_permission,
+            owner_key=owner_key,
         )
         return run_id
 
@@ -310,7 +376,33 @@ class Gateway:
             user_input=user_input,
             send_event=self._ws_sender(websocket),
             ask_permission=lambda **kwargs: self.ask_permission(websocket, **kwargs),
+            owner_key=self._owner_key_for_websocket(websocket),
         )
+
+    async def handle_run_stop(self, websocket: WebSocket, req: dict):
+        params = req.get("params") or {}
+        run_id = str(params.get("runId", "") or "").strip()
+        if not run_id:
+            owner_key = self._owner_key_for_websocket(websocket)
+            for candidate in reversed(self._runs_by_owner.get(owner_key, [])):
+                task = self._run_tasks.get(candidate)
+                if task is not None and not task.done():
+                    run_id = candidate
+                    break
+        if not run_id:
+            await websocket.send_json(
+                create_response(
+                    req.get("id", "unknown"),
+                    ok=False,
+                    error="No active run to stop for this client",
+                )
+            )
+            return
+        status = self._stop_run_task(run_id=run_id)
+        if status == "unknown":
+            await websocket.send_json(create_response(req.get("id", "unknown"), ok=False, error=f"Unknown runId: {run_id}"))
+            return
+        await websocket.send_json(create_response(req.get("id", "unknown"), ok=True, payload={"runId": run_id, "status": status}))
 
 
 def create_app() -> FastAPI:
@@ -359,7 +451,7 @@ def create_app() -> FastAPI:
                 create_response(
                     req.get("id", "unknown"),
                     ok=True,
-                    payload={"gatewayVersion": "2.0.0", "supportedMethods": ["run.create", "run.cancel", "permission.respond"]},
+                    payload={"gatewayVersion": "2.0.0", "supportedMethods": ["run.create", "run.stop", "permission.respond"]},
                 )
             )
             # Deliver any queued permission requests (offline-safe scheduled runs).
@@ -386,6 +478,8 @@ def create_app() -> FastAPI:
                     await gateway.handle_permission_respond(websocket, req)
                 elif method == "run.create":
                     await gateway.handle_run_create(websocket, req)
+                elif method == "run.stop":
+                    await gateway.handle_run_stop(websocket, req)
                 else:
                     await websocket.send_json(create_response(req.get("id", "unknown"), ok=False, error=f"Unknown method: {method}"))
         except WebSocketDisconnect:

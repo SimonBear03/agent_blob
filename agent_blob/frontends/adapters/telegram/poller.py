@@ -12,6 +12,12 @@ from agent_blob.frontends.adapters.telegram.renderer import TelegramRenderer
 
 logger = logging.getLogger("agent_blob.telegram")
 
+def _is_stop_phrase(text: str) -> bool:
+    msg = (text or "").strip().lower()
+    if msg in {"stop", "please stop", "stop it", "stop that", "stop this", "halt"}:
+        return True
+    return msg.startswith("stop ") and any(token in msg for token in ("run", "task", "that", "this", "now"))
+
 
 class TelegramPoller:
     def __init__(self, *, gateway: Any):
@@ -71,6 +77,15 @@ class TelegramPoller:
         if (not text) and (not attachments):
             return
 
+        if _is_stop_phrase(text) and not attachments:
+            owner_key = f"adapter:telegram:{chat_id}"
+            stopped = await self.gateway.stop_latest_for_owner(owner_key=owner_key)
+            if stopped:
+                await self.client.send_message(chat_id=chat_id, text=f"Stop requested for {stopped}.")
+            else:
+                await self.client.send_message(chat_id=chat_id, text="No active run to stop.")
+            return
+
         user_input = text
         if attachments:
             attachment_note = json.dumps({"attachments": attachments}, ensure_ascii=False)
@@ -80,6 +95,7 @@ class TelegramPoller:
             user_input=user_input,
             send_event=lambda ev: self.renderer.handle_event(ev, chat_id=chat_id),
             ask_permission=self.renderer.ask_permission,
+            owner_key=f"adapter:telegram:{chat_id}",
         )
         logger.info("telegram run accepted: %s", run_id)
 

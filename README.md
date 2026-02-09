@@ -191,7 +191,7 @@ Agent Blob keeps operational state in `data/` and memory/history in `memory/`.
 ### Retention policy
 
 Only `data/tasks.json` is actively pruned today (via supervisor maintenance):
-- Terminal tasks (`done/cancelled/failed`) are kept for `maintenance.tasks_keep_done_days` days (default 30) and capped at `maintenance.tasks_keep_done_max` (default 200).
+- Terminal tasks (`done/stopped/failed`) are kept for `maintenance.tasks_keep_done_days` days (default 30) and capped at `maintenance.tasks_keep_done_max` (default 200).
 - Active tasks are always kept.
 
 Additionally, tasks that remain non-terminal but inactive are **auto-closed**:
@@ -252,6 +252,13 @@ The agent can manage structured memories without using the shell:
 
 `shell_run` (capability `shell.run`) is permission-gated. Commands that look like they **modify files** (redirections like `>`/`>>`, `tee`, `sed -i`, `rm`, etc.) are treated as `shell.write` and will prompt separately.
 
+### Run stop
+
+- Protocol supports `run.stop` with optional `{ "runId": "..." }`.
+- If `runId` is omitted, gateway stops the latest active run for that same client.
+- CLI supports `/stop <run_id>` and natural-language stop phrases (for example: `stop that run`, `please stop`).
+- On stop, gateway emits `run.status=stopped` then `run.final`, and matching tasks are marked `stopped`.
+
 ## Testing checklist
 
 1) **Permission prompt**
@@ -280,6 +287,11 @@ The agent can manage structured memories without using the shell:
    - Confirm the agent does not call `memory_delete`.
    - Ask explicitly: “Forget the memory about X.”
    - Confirm `memory_delete` is requested and permission-gated.
+
+6) **Run stop**
+   - Start a long request (for example a web-fetch-heavy prompt).
+   - Stop it with either `/stop <run_id>` or a plain message like `stop that run`.
+   - Confirm you receive `status: stopped` and a final event.
 
 4) **MCP**
    - Start `python3 scripts/mcp_example_server.py --port 9000`.

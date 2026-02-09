@@ -109,11 +109,30 @@ class TaskStore:
         self._save(data)
         self._append_event({"type": "task.status", "taskId": task_id, "status": status})
 
+    async def set_status_by_run(self, *, run_id: str, status: str) -> int:
+        data = self._load()
+        touched = 0
+        now = time.time()
+        for tid, task in list(data.items()):
+            if not isinstance(task, dict):
+                continue
+            run_ids = list(task.get("run_ids") or [])
+            if run_id not in run_ids:
+                continue
+            task["status"] = status
+            task["updated_at"] = now
+            data[tid] = task
+            touched += 1
+            self._append_event({"type": "task.status", "taskId": tid, "status": status, "runId": run_id})
+        if touched:
+            self._save(data)
+        return touched
+
     async def most_recent_active(self) -> Optional[dict]:
         tasks = await self.list_tasks()
         for t in tasks:
             status = str(t.get("status", "") or "")
-            if status not in ("done", "cancelled", "failed"):
+            if status not in ("done", "stopped", "failed"):
                 return t
         return None
 
@@ -121,7 +140,7 @@ class TaskStore:
         """
         Return the most recently updated task within the given time window.
 
-        If include_terminal is False, terminal tasks (done/cancelled/failed) are ignored.
+        If include_terminal is False, terminal tasks (done/stopped/failed) are ignored.
         """
         window_s = max(0, int(window_s))
         if window_s <= 0:
@@ -130,7 +149,7 @@ class TaskStore:
         tasks = await self.list_tasks()
         for t in tasks:
             status = str(t.get("status", "") or "")
-            if (not include_terminal) and status in ("done", "cancelled", "failed"):
+            if (not include_terminal) and status in ("done", "stopped", "failed"):
                 continue
             updated = float(t.get("updated_at", 0) or 0)
             if now - updated <= window_s:
@@ -150,7 +169,7 @@ class TaskStore:
 
         data = self._load()
         now = time.time()
-        terminal_statuses = {"done", "cancelled", "failed"}
+        terminal_statuses = {"done", "stopped", "failed"}
         closed = 0
 
         for tid, t in list(data.items()):
@@ -179,7 +198,7 @@ class TaskStore:
 
     async def purge_done(self, *, keep_days: int = 30, keep_max: int = 200) -> dict:
         """
-        Purge completed/cancelled/failed tasks from tasks.json, keeping:
+        Purge completed/stopped/failed tasks from tasks.json, keeping:
         - all non-terminal tasks
         - terminal tasks updated within keep_days
         - at most keep_max terminal tasks (most recent)
@@ -190,7 +209,7 @@ class TaskStore:
         now = time.time()
         cutoff = now - (keep_days * 86400)
 
-        terminal_statuses = {"done", "cancelled", "failed"}
+        terminal_statuses = {"done", "stopped", "failed"}
         terminal = []
         active = {}
 

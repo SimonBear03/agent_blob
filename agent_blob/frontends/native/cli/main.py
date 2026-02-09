@@ -19,6 +19,13 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
+def _is_stop_phrase(line: str) -> bool:
+    text = (line or "").strip().lower()
+    if text in {"stop", "please stop", "stop it", "stop that", "stop this", "halt"}:
+        return True
+    return text.startswith("stop ") and any(token in text for token in ("run", "task", "that", "this", "now"))
+
+
 @dataclass
 class RunBuffer:
     run_id: str
@@ -152,6 +159,36 @@ async def main() -> None:
                     return
                 line = (line or "").strip()
                 if not line:
+                    continue
+                if line.lower().startswith("/stop "):
+                    run_id = line.split(None, 1)[1].strip()
+                    if not run_id:
+                        print("\n[cli] usage: /stop <run_id>")
+                        continue
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "req",
+                                "id": _new_id("stop"),
+                                "method": "run.stop",
+                                "params": {"runId": run_id},
+                            }
+                        )
+                    )
+                    print(f"\n[cli] stop requested: {run_id}")
+                    continue
+                if _is_stop_phrase(line):
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "req",
+                                "id": _new_id("stop"),
+                                "method": "run.stop",
+                                "params": {},
+                            }
+                        )
+                    )
+                    print("\n[cli] stop requested: latest active run")
                     continue
 
                 async with pending_lock:

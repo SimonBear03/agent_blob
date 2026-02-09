@@ -836,7 +836,7 @@ class Runtime:
             active = []
             for t in tasks:
                 status = str(t.get("status") or "")
-                if status in ("done", "cancelled", "failed"):
+                if status in ("done", "stopped", "failed"):
                     continue
                 updated = float(t.get("updated_at", 0) or 0)
                 if status in always_active or (now - updated) <= window_s:

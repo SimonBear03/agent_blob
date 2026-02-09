@@ -74,13 +74,13 @@ V3 is done when all are true:
 
 ## 1) Reliability & Control Plane
 ### Deliverables
-- Implement `run.cancel` end-to-end.
-- Add run state machine guardrails (`queued -> running -> waiting_permission -> done/failed/cancelled`).
+- Implement `run.stop` end-to-end.
+- Add run state machine guardrails (`queued -> running -> waiting_permission -> done/failed/stopped`).
 - Prevent duplicate streaming and orphaned run tasks on disconnect.
 - Add idempotent permission response handling.
 
 ### Acceptance
-- Cancelling a run stops further tool calls and streaming.
+- Stopping a run stops further tool calls and streaming.
 - Disconnect/reconnect does not crash gateway or leave invalid websocket send attempts.
 
 ## 2) Scheduler Hardening
@@ -133,7 +133,7 @@ V3 is done when all are true:
 - Add test suites for:
   - scheduler behavior,
   - permission flow,
-  - run cancellation,
+  - run stop,
   - memory insert/search/delete,
   - worker lifecycle.
 - Add operational docs:
@@ -147,7 +147,7 @@ V3 is done when all are true:
 
 ## Milestones
 ### M1: Runtime Control Stability
-- `run.cancel`, websocket safety, permission queue correctness.
+- `run.stop`, websocket safety, permission queue correctness.
 
 ### M2: Scheduler + Workers Stability
 - deterministic scheduler behavior and worker lifecycle visibility.
